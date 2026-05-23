@@ -3,16 +3,28 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from ..analytics import (
     analyze_meal as _analyze_meal,
+)
+from ..analytics import (
     compare_periods as _compare_periods,
+)
+from ..analytics import (
     compression_low_analysis as _compression_low_analysis,
+)
+from ..analytics import (
     daily_report as _daily_report,
+)
+from ..analytics import (
     detect_patterns as _detect_patterns,
+)
+from ..analytics import (
     insulin_sensitivity_check as _isf_check,
+)
+from ..analytics import (
     overnight_analysis as _overnight_analysis,
 )
 from ..client import NightscoutClient
@@ -37,12 +49,12 @@ def _unix_ms(dt: datetime) -> int:
 
 
 def _iso_z(dt: datetime) -> str:
-    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
 def _parse_date(s: str) -> datetime:
     """Accept YYYY-MM-DD and return a UTC midnight datetime."""
-    return datetime.fromisoformat(s).replace(tzinfo=timezone.utc)
+    return datetime.fromisoformat(s).replace(tzinfo=UTC)
 
 
 async def _fetch_sgvs_between(
@@ -188,7 +200,7 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
         """
         client = get_client()
         days = max(1, min(days, 30))
-        end = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+        end = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
         start = end - timedelta(days=days)
         sgvs = await _fetch_sgvs_between(client, start, end)
         # Group by date string (YYYY-MM-DD)
@@ -213,7 +225,7 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
         """
         client = get_client()
         days = max(1, min(days, 30))
-        end = datetime.now(timezone.utc)
+        end = datetime.now(UTC)
         start = end - timedelta(days=days)
         sgvs = await _fetch_sgvs_between(client, start, end)
         txs = await _fetch_treatments_between(client, start, end)
@@ -246,7 +258,7 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
         """
         client = get_client()
         days = max(1, min(days, 30))
-        end = datetime.now(timezone.utc)
+        end = datetime.now(UTC)
         start = end - timedelta(days=days)
         sgvs = await _fetch_sgvs_between(client, start, end)
         return _compression_low_analysis(days, sgvs)

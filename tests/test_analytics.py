@@ -6,7 +6,7 @@ functions surface the expected signals.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from nightscout_mcp.analytics import (
     analyze_meal,
@@ -55,7 +55,7 @@ def _tx(
 
 
 def test_daily_report_aggregates_insulin_and_carbs() -> None:
-    base = datetime(2026, 5, 22, tzinfo=timezone.utc)
+    base = datetime(2026, 5, 22, tzinfo=UTC)
     sgvs = [_sgv(120, base + timedelta(minutes=i * 5)) for i in range(20)]
     txs = [
         _tx("Bolus", base + timedelta(hours=8), insulin=2.5),
@@ -74,7 +74,7 @@ def test_daily_report_aggregates_insulin_and_carbs() -> None:
 def test_daily_report_filters_auto_generated_profile_switch_notes() -> None:
     """AAPS Profile Switch / Temp Basal / Temporary Override rows often carry
     the profile name as `notes` — that's sync noise, not real user notes."""
-    base = datetime(2026, 5, 22, tzinfo=timezone.utc)
+    base = datetime(2026, 5, 22, tzinfo=UTC)
     txs = [
         _tx("Profile Switch", base, notes="regular (60%)"),
         _tx("Temp Basal", base + timedelta(minutes=5), notes="0.8U/h auto"),
@@ -88,7 +88,7 @@ def test_daily_report_filters_auto_generated_profile_switch_notes() -> None:
 
 
 def test_compare_periods_flags_improved_tir() -> None:
-    base = datetime(2026, 5, 22, tzinfo=timezone.utc)
+    base = datetime(2026, 5, 22, tzinfo=UTC)
     # Period A: half in-range, half high → TIR 50%
     a = [_sgv(120, base + timedelta(minutes=i * 5)) for i in range(10)] + [
         _sgv(220, base + timedelta(minutes=(i + 10) * 5)) for i in range(10)
@@ -104,7 +104,7 @@ def test_compare_periods_flags_improved_tir() -> None:
 
 
 def test_analyze_meal_finds_peak_and_time_to_peak() -> None:
-    meal_time = datetime(2026, 5, 22, 12, 0, tzinfo=timezone.utc)
+    meal_time = datetime(2026, 5, 22, 12, 0, tzinfo=UTC)
     sgvs = [
         _sgv(110, meal_time - timedelta(minutes=10)),  # pre
         _sgv(120, meal_time + timedelta(minutes=30)),
@@ -123,7 +123,7 @@ def test_analyze_meal_finds_peak_and_time_to_peak() -> None:
 
 
 def test_analyze_meal_handles_empty_window() -> None:
-    meal_time = datetime(2026, 5, 22, 12, 0, tzinfo=timezone.utc)
+    meal_time = datetime(2026, 5, 22, 12, 0, tzinfo=UTC)
     r = analyze_meal(meal_time, None, [], window_hours=4)
     assert r.peak_mgdl == 0  # degenerate
     assert any("No CGM readings" in n for n in r.notes)
@@ -133,7 +133,7 @@ def test_analyze_meal_handles_empty_window() -> None:
 
 
 def test_overnight_analysis_computes_drift_and_dawn_rise() -> None:
-    base = datetime(2026, 5, 22, 0, 0, tzinfo=timezone.utc)
+    base = datetime(2026, 5, 22, 0, 0, tzinfo=UTC)
     # Readings every 30 minutes from 00:00 to 07:00, stable at 100 then dawn rise
     sgvs: list[Sgv] = []
     for hour in range(8):
@@ -147,7 +147,7 @@ def test_overnight_analysis_computes_drift_and_dawn_rise() -> None:
 
 
 def test_overnight_analysis_counts_below_70_time() -> None:
-    base = datetime(2026, 5, 22, 0, 0, tzinfo=timezone.utc)
+    base = datetime(2026, 5, 22, 0, 0, tzinfo=UTC)
     # 5min cadence; 4 readings at 60 mg/dL = 20 min below 70
     sgvs = [_sgv(60, base + timedelta(minutes=i * 5)) for i in range(4)] + [
         _sgv(100, base + timedelta(minutes=20 + i * 5)) for i in range(10)
@@ -163,7 +163,7 @@ def test_detect_patterns_flags_recurring_overnight_low() -> None:
     """Three of 5 days have a 02:00 dip below 70."""
     groups = []
     for day in range(1, 6):
-        d = datetime(2026, 5, day, 0, 0, tzinfo=timezone.utc)
+        d = datetime(2026, 5, day, 0, 0, tzinfo=UTC)
         readings = [_sgv(110, d + timedelta(hours=h)) for h in range(8)]
         if day <= 3:
             # Replace 02:00 reading with a low
@@ -179,7 +179,7 @@ def test_detect_patterns_flags_recurring_overnight_low() -> None:
 def test_detect_patterns_flags_dawn_phenomenon() -> None:
     groups = []
     for day in range(1, 4):
-        d = datetime(2026, 5, day, 0, 0, tzinfo=timezone.utc)
+        d = datetime(2026, 5, day, 0, 0, tzinfo=UTC)
         readings = []
         for hour in range(8):
             v = 100 if hour < 3 else 100 + (hour - 2) * 20  # big dawn rise
@@ -196,7 +196,7 @@ def test_detect_patterns_flags_dawn_phenomenon() -> None:
 
 def test_isf_check_derives_from_isolated_corrections() -> None:
     """Two correction boluses: each drops 50 mg/dL on 1.0U → derived ISF 50 mg/dL/U."""
-    base = datetime(2026, 5, 22, 12, 0, tzinfo=timezone.utc)
+    base = datetime(2026, 5, 22, 12, 0, tzinfo=UTC)
     sgvs = [
         # Bolus 1: pre 200 mg/dL → drop to 150 within DIA
         _sgv(200, base - timedelta(minutes=10)),
@@ -220,7 +220,7 @@ def test_isf_check_derives_from_isolated_corrections() -> None:
 
 def test_isf_check_excludes_boluses_near_carbs() -> None:
     """A correction bolus within ±60 min of a carb entry should be ignored."""
-    base = datetime(2026, 5, 22, 12, 0, tzinfo=timezone.utc)
+    base = datetime(2026, 5, 22, 12, 0, tzinfo=UTC)
     sgvs = [
         _sgv(200, base - timedelta(minutes=10)),
         _sgv(150, base + timedelta(hours=3)),
@@ -240,7 +240,7 @@ def test_isf_check_excludes_boluses_near_carbs() -> None:
 
 def test_compression_low_detects_fast_drop_and_recovery() -> None:
     """Classic compression-low pattern: 100 → 50 → 100 in 10 min total."""
-    base = datetime(2026, 5, 22, 2, 0, tzinfo=timezone.utc)
+    base = datetime(2026, 5, 22, 2, 0, tzinfo=UTC)
     sgvs = [
         _sgv(105, base - timedelta(minutes=10)),
         _sgv(100, base - timedelta(minutes=5)),
@@ -255,7 +255,7 @@ def test_compression_low_detects_fast_drop_and_recovery() -> None:
 
 def test_compression_low_does_not_flag_slow_real_hypo() -> None:
     """A real hypo: gradual drop, slow recovery over an hour — NOT a compression."""
-    base = datetime(2026, 5, 22, 2, 0, tzinfo=timezone.utc)
+    base = datetime(2026, 5, 22, 2, 0, tzinfo=UTC)
     sgvs = [_sgv(110 - i * 4, base + timedelta(minutes=i * 5)) for i in range(8)] + [
         _sgv(78 + i * 3, base + timedelta(minutes=40 + i * 5)) for i in range(10)
     ]

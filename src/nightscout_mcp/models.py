@@ -10,7 +10,7 @@ without forcing the caller to know which is which.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -44,7 +44,7 @@ class Sgv(BaseModel):
         self.trend_arrow = direction_to_arrow(self.direction)
         if not self.date_iso:
             # Build ISO from the millisecond timestamp.
-            dt = datetime.fromtimestamp(self.date_ms / 1000, tz=timezone.utc)
+            dt = datetime.fromtimestamp(self.date_ms / 1000, tz=UTC)
             self.date_iso = dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
 
 
@@ -174,7 +174,7 @@ class DailyReport(BaseModel):
     """One-day rollup: stats + treatments + key events."""
 
     date: str  # YYYY-MM-DD
-    stats: "GlucoseStats"
+    stats: GlucoseStats
     treatment_count: int
     total_insulin_u: float
     total_carbs_g: float
@@ -186,8 +186,8 @@ class PeriodComparison(BaseModel):
 
     period_a_label: str
     period_b_label: str
-    period_a: "GlucoseStats"
-    period_b: "GlucoseStats"
+    period_a: GlucoseStats
+    period_b: GlucoseStats
     delta_mean_mgdl: float
     delta_tir_pp: float  # percentage points
     delta_gmi_pp: float
@@ -305,5 +305,5 @@ def parse_iso_to_utc(iso: str) -> datetime:
         iso = iso[:-1] + "+00:00"
     dt = datetime.fromisoformat(iso)
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)

@@ -12,14 +12,12 @@ diagnoses.
 from __future__ import annotations
 
 import statistics
-from datetime import datetime, time, timedelta, timezone
-from typing import Iterable
+from datetime import datetime, timedelta
 
 from .models import (
     CompressionAnalysis,
     DailyReport,
     DetectedPatterns,
-    GlucoseStats,
     IsfDerivation,
     MealAnalysis,
     OvernightAnalysis,
@@ -312,7 +310,10 @@ def detect_patterns(
                 occurrence_count=len(overnight_low_times),
                 sample_times_iso=overnight_low_times[:5],
                 avg_value_mgdl=round(statistics.fmean(overnight_low_values), 1),
-                description=f"Glucose dipped to avg {round(statistics.fmean(overnight_low_values))} mg/dL between 00:00-06:00 on {len(overnight_low_times)} of {days} nights.",
+                description=(
+                    f"Glucose dipped to avg {round(statistics.fmean(overnight_low_values))} mg/dL "
+                    f"between 00:00-06:00 on {len(overnight_low_times)} of {days} nights."
+                ),
             )
         )
     if dawn_rises:
@@ -322,7 +323,11 @@ def detect_patterns(
                 occurrence_count=len(dawn_rises),
                 sample_times_iso=dawn_rise_times[:5],
                 avg_value_mgdl=round(statistics.fmean(dawn_rises), 1),
-                description=f"Dawn rise > {DAWN_RISE_THRESHOLD_MGDL} mg/dL on {len(dawn_rises)} of {days} mornings (03:00 → 07:00). Consider increasing pre-dawn basal or reviewing overnight insulin needs.",
+                description=(
+                    f"Dawn rise > {DAWN_RISE_THRESHOLD_MGDL} mg/dL on {len(dawn_rises)} of {days} "
+                    "mornings (03:00 → 07:00). Consider increasing pre-dawn basal or reviewing "
+                    "overnight insulin needs."
+                ),
             )
         )
     if spike_times:
@@ -332,7 +337,10 @@ def detect_patterns(
                 occurrence_count=len(spike_times),
                 sample_times_iso=spike_times[:5],
                 avg_value_mgdl=round(statistics.fmean(spike_values), 1),
-                description=f"Rapid rises >50 mg/dL within 30 min seen on {len(spike_times)} of {days} days. Bolus-to-eat timing may benefit from a longer pre-bolus.",
+                description=(
+                    f"Rapid rises >50 mg/dL within 30 min seen on {len(spike_times)} of {days} days. "
+                    "Bolus-to-eat timing may benefit from a longer pre-bolus."
+                ),
             )
         )
 
@@ -416,7 +424,10 @@ def insulin_sensitivity_check(
             profile_isf_mmol_per_unit=profile_isf_mmol,
             ratio_derived_over_profile=None,
             confidence="low",
-            recommendation="Not enough isolated correction boluses to derive a real-world ISF. Need at least a handful of correction-only boluses without carbs within ±60 min.",
+            recommendation=(
+                "Not enough isolated correction boluses to derive a real-world ISF. "
+                "Need at least a handful of correction-only boluses without carbs within ±60 min."
+            ),
         )
 
     derived_mgdl = statistics.fmean(samples_mgdl_per_u)
@@ -433,9 +444,16 @@ def insulin_sensitivity_check(
     if ratio is None:
         recommendation = "No profile ISF available to compare against."
     elif ratio > 1.15:
-        recommendation = "Derived ISF suggests you're MORE sensitive than your profile says (each unit drops you further). Consider lowering profile ISF or reviewing for overcorrections."
+        recommendation = (
+            "Derived ISF suggests you're MORE sensitive than your profile says "
+            "(each unit drops you further). Consider lowering profile ISF or "
+            "reviewing for overcorrections."
+        )
     elif ratio < 0.85:
-        recommendation = "Derived ISF suggests you're LESS sensitive than your profile says (each unit drops you less). Consider raising profile ISF."
+        recommendation = (
+            "Derived ISF suggests you're LESS sensitive than your profile says "
+            "(each unit drops you less). Consider raising profile ISF."
+        )
     else:
         recommendation = "Derived ISF is consistent with your profile (within ±15%)."
 
