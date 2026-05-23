@@ -277,6 +277,116 @@ async def test_get_device_status_flattens_nested_fields(
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_get_device_status_skips_uploader_only_rows(
+    registry_and_client: tuple[_ToolRegistry, NightscoutClient],
+) -> None:
+    """Issue #2: when the latest devicestatus row is from a non-loop uploader,
+    walk further back to find a row with actual loop/pump fields.
+    """
+    reg, client = registry_and_client
+    payload = [
+        # Most recent: uploader phone, no loop data
+        {
+            "device": "openaps://AAPSClient Phone",
+            "created_at": "2026-05-23T00:50:00.000Z",
+            "uploader": {"battery": 84},
+        },
+        # 1 step back: still uploader
+        {
+            "device": "openaps://AAPSClient Phone",
+            "created_at": "2026-05-23T00:45:00.000Z",
+            "uploader": {"battery": 83},
+        },
+        # 2 steps back: actual loop instance with iob
+        {
+            "device": "openaps://Loop Phone",
+            "created_at": "2026-05-23T00:40:00.000Z",
+            "openaps": {"iob": {"iob": 2.75}, "suggested": {"COB": 31.5}},
+            "pump": {"battery": {"percent": 88}, "reservoir": 145.0},
+        },
+    ]
+    respx.get(url__startswith="https://test.nightscout.example/api/v1/devicestatus.json").mock(
+        return_value=httpx.Response(200, json=payload)
+    )
+    try:
+        ds = await reg.tools["get_device_status"](latest=True)
+    finally:
+        await client.aclose()
+    # Should have skipped the two uploader-only rows.
+    assert ds.iob_u == 2.75
+    assert ds.cob_g == 31.5
+    assert ds.pump_reservoir_u == 145.0
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_device_status_prefers_loop_data_over_pump_only_latest(
+    registry_and_client: tuple[_ToolRegistry, NightscoutClient],
+) -> None:
+    """Issue #2 — live scenario from gladoctopus.my.nightscoutpro.com:
+
+    The chronologically newest devicestatus row has pump fields (reservoir,
+    battery) but no loop fields (iob, cob, enacted). A prior row carries
+    the openaps loop blob. The tool must prefer the row with loop data
+    even though it's older.
+    """
+    reg, client = registry_and_client
+    payload = [
+        # Latest: pump-only (typical AAPSClient cycle without iob publish)
+        {
+            "device": "openaps://AAPSClient Phone",
+            "created_at": "2026-05-23T01:15:00.000Z",
+            "pump": {"reservoir": 75.0},
+        },
+        # Older: has loop data we actually want
+        {
+            "device": "openaps://Loop Phone",
+            "created_at": "2026-05-23T01:10:00.000Z",
+            "openaps": {"iob": {"iob": 2.75}, "suggested": {"COB": 31.5}},
+            "pump": {"reservoir": 80.0},
+        },
+    ]
+    respx.get(url__startswith="https://test.nightscout.example/api/v1/devicestatus.json").mock(
+        return_value=httpx.Response(200, json=payload)
+    )
+    try:
+        ds = await reg.tools["get_device_status"](latest=True)
+    finally:
+        await client.aclose()
+    # Must surface IOB/COB from the older row, not the pump-only newer one.
+    assert ds.iob_u == 2.75
+    assert ds.cob_g == 31.5
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_device_status_falls_back_when_no_row_has_loop_data(
+    registry_and_client: tuple[_ToolRegistry, NightscoutClient],
+) -> None:
+    """If NO recent row has loop/pump data, return the literal latest row
+    (caller still gets timestamp + device + uploader battery).
+    """
+    reg, client = registry_and_client
+    payload = [
+        {
+            "device": "openaps://AAPSClient Phone",
+            "created_at": "2026-05-23T00:50:00.000Z",
+            "uploader": {"battery": 84},
+        }
+    ]
+    respx.get(url__startswith="https://test.nightscout.example/api/v1/devicestatus.json").mock(
+        return_value=httpx.Response(200, json=payload)
+    )
+    try:
+        ds = await reg.tools["get_device_status"](latest=True)
+    finally:
+        await client.aclose()
+    assert ds.device == "openaps://AAPSClient Phone"
+    assert ds.iob_u is None
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_get_server_status(
     registry_and_client: tuple[_ToolRegistry, NightscoutClient],
 ) -> None:
