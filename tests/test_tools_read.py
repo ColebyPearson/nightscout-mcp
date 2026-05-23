@@ -18,6 +18,7 @@ from nightscout_mcp.client import NightscoutClient
 from nightscout_mcp.config import Settings
 from nightscout_mcp.tools import analytics as analytics_tools
 from nightscout_mcp.tools import read as read_tools
+from nightscout_mcp.tools import synthesis as synthesis_tools
 
 # The whole point: if this string ever leaks into a tool response, the
 # regression test below fails loudly.
@@ -54,6 +55,7 @@ def registry_and_client(settings: Settings) -> tuple[_ToolRegistry, NightscoutCl
     reg = _ToolRegistry()
     read_tools.register(reg, lambda: client)
     analytics_tools.register(reg, lambda: client)
+    synthesis_tools.register(reg, lambda: client)
     return reg, client
 
 
@@ -770,6 +772,7 @@ async def test_no_tool_response_contains_the_token(
             await reg.tools["search_treatments"](query="bolus"),
             await reg.tools["glucose_at_time"](time_iso="2026-05-22T18:00:00Z"),
             await reg.tools["effective_isf_check"](days=1),
+            await reg.tools["daily_synthesis"](days_back=1),
             await reg.tools["health_check"](),
         ]
     finally:
