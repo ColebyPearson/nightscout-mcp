@@ -10,6 +10,9 @@ from ..analytics import (
     analyze_meal as _analyze_meal,
 )
 from ..analytics import (
+    carb_ratio_check as _carb_ratio_check,
+)
+from ..analytics import (
     compare_periods as _compare_periods,
 )
 from ..analytics import (
@@ -30,6 +33,7 @@ from ..analytics import (
 from ..client import NightscoutClient
 from ..models import (
     CompressionAnalysis,
+    CrDerivation,
     DailyReport,
     DetectedPatterns,
     IsfDerivation,
@@ -244,6 +248,39 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
         except (AttributeError, KeyError, IndexError, TypeError):
             pass
         return _isf_check(txs, sgvs, profile_isf_mmol, dia_hours=dia)
+
+    @mcp.tool()
+    async def carb_ratio_check(days: int = 14) -> CrDerivation:
+        """Derive a real-world carb-ratio signal from meal-bolus outcomes
+        and compare to your profile carb ratio.
+
+        Args:
+            days: lookback window. Default 14, max 30.
+
+        A meal is eligible when: carbs > 5g, insulin > 0, has a pre-meal CGM
+        reading AND a CGM reading ~4h later, AND no other meal lands in that
+        4h window. Reports both the average CR the user actually applied
+        (carbs ÷ insulin) and the average post-meal residual (end BG − pre-meal
+        BG) so over- vs under-bolusing is visible separately from CR drift.
+        """
+        client = get_client()
+        days = max(1, min(days, 30))
+        end = datetime.now(UTC)
+        start = end - timedelta(days=days)
+        sgvs = await _fetch_sgvs_between(client, start, end)
+        txs = await _fetch_treatments_between(client, start, end)
+        profile = await client.get("/api/v1/profile.json")
+        profile_cr: float | None = None
+        try:
+            record = profile[0] if isinstance(profile, list) and profile else profile
+            sub = (record.get("store") or {}).get(record.get("defaultProfile", "Default"))
+            if sub:
+                cr_entries = sub.get("carbratio") or []
+                if cr_entries:
+                    profile_cr = float(cr_entries[0].get("value", 0)) or None
+        except (AttributeError, KeyError, IndexError, TypeError):
+            pass
+        return _carb_ratio_check(txs, sgvs, profile_cr)
 
     @mcp.tool()
     async def compression_low_analysis(days: int = 14) -> CompressionAnalysis:

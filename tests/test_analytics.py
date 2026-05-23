@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 
 from nightscout_mcp.analytics import (
     analyze_meal,
+    carb_ratio_check,
     compare_periods,
     compression_low_analysis,
     daily_report,
@@ -261,3 +262,90 @@ def test_compression_low_does_not_flag_slow_real_hypo() -> None:
     ]
     r = compression_low_analysis(1, sgvs)
     assert len(r.suspected) == 0
+
+
+# --- carb_ratio_check --------------------------------------------------------
+
+
+def test_carb_ratio_check_derives_average_applied_cr() -> None:
+    """Two meal boluses (combined carbs+insulin rows): 60g/6U=10 and 40g/4U=10.
+    Profile CR=15. Derived=10, ratio=0.67."""
+    base = datetime(2026, 5, 22, 12, 0, tzinfo=UTC)
+    sgvs = [
+        # Meal 1: pre 120, ends at 130
+        _sgv(120, base - timedelta(minutes=10)),
+        _sgv(140, base + timedelta(hours=1)),
+        _sgv(130, base + timedelta(hours=4) - timedelta(minutes=5)),
+        # Meal 2: pre 110, ends at 120
+        _sgv(110, base + timedelta(hours=8) - timedelta(minutes=10)),
+        _sgv(140, base + timedelta(hours=9)),
+        _sgv(120, base + timedelta(hours=12) - timedelta(minutes=5)),
+    ]
+    txs = [
+        _tx("Meal Bolus", base, insulin=6.0, carbs=60),
+        _tx("Meal Bolus", base + timedelta(hours=8), insulin=4.0, carbs=40),
+    ]
+    r = carb_ratio_check(txs, sgvs, profile_cr_g_per_unit=15.0)
+    assert r.sample_count == 2
+    assert r.derived_cr_g_per_unit == 10.0
+    assert r.ratio_derived_over_profile == 0.67
+    assert r.confidence == "low"  # <3 samples
+
+
+def test_carb_ratio_check_pairs_aaps_style_split_carb_and_insulin_rows() -> None:
+    """AAPS writes carbs and insulin as SEPARATE treatment rows close in time.
+    Discovered against gladoctopus.my.nightscoutpro.com — 0 of 50 rows had
+    both fields populated in one row.
+    """
+    base = datetime(2026, 5, 22, 12, 0, tzinfo=UTC)
+    sgvs = [
+        _sgv(120, base - timedelta(minutes=10)),
+        _sgv(135, base + timedelta(hours=4) - timedelta(minutes=5)),
+    ]
+    txs = [
+        # AAPS style: separate carb row + insulin row at the same minute
+        _tx("Carb Correction", base, carbs=50),
+        _tx("Correction Bolus", base + timedelta(seconds=30), insulin=5.0),
+    ]
+    r = carb_ratio_check(txs, sgvs, profile_cr_g_per_unit=10.0)
+    assert r.sample_count == 1
+    assert r.derived_cr_g_per_unit == 10.0  # 50g / 5U
+
+
+def test_carb_ratio_check_excludes_meal_with_subsequent_meal_in_window() -> None:
+    """A meal followed by another carb meal within 4h is excluded — the
+    subsequent meal pollutes the post-meal residual measurement. Prior meals
+    don't contaminate because they're absorbed before our analysis window."""
+    base = datetime(2026, 5, 22, 12, 0, tzinfo=UTC)
+    sgvs = [
+        # For meal #1 (eligible base): pre + end
+        _sgv(120, base - timedelta(minutes=10)),
+        _sgv(130, base + timedelta(hours=3, minutes=50)),
+        # For meal #2 (subsequent — eligible since no later meal)
+        _sgv(118, base + timedelta(hours=2) - timedelta(minutes=10)),
+        _sgv(135, base + timedelta(hours=6) - timedelta(minutes=5)),
+    ]
+    txs = [
+        _tx("Meal Bolus", base, insulin=5.0, carbs=50),  # contaminated by meal #2
+        _tx("Meal Bolus", base + timedelta(hours=2), insulin=4.0, carbs=40),  # eligible
+    ]
+    r = carb_ratio_check(txs, sgvs, profile_cr_g_per_unit=10.0)
+    # Only meal #2 should be eligible: it has no subsequent meal within 4h.
+    assert r.sample_count == 1
+    assert r.derived_cr_g_per_unit == 10.0  # 40/4
+
+
+def test_carb_ratio_check_flags_systematic_post_meal_rise() -> None:
+    """Meals consistently ending ~40 mg/dL higher than they started → under-bolused."""
+    base = datetime(2026, 5, 22, 7, 0, tzinfo=UTC)
+    sgvs: list[Sgv] = []
+    txs: list[Treatment] = []
+    for day in range(5):
+        meal_time = base + timedelta(days=day)
+        sgvs.append(_sgv(100, meal_time - timedelta(minutes=10)))
+        sgvs.append(_sgv(140, meal_time + timedelta(hours=4) - timedelta(minutes=5)))
+        txs.append(_tx("Meal Bolus", meal_time, insulin=4.0, carbs=40))
+    r = carb_ratio_check(txs, sgvs, profile_cr_g_per_unit=10.0)
+    assert r.sample_count == 5
+    assert r.avg_end_minus_pre_mgdl == 40.0
+    assert "may be too high" in r.recommendation.lower()  # CR too high → undercovered
