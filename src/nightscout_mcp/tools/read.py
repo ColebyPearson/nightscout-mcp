@@ -91,9 +91,11 @@ def _flatten_device_status(row: dict[str, Any]) -> DeviceStatusSummary:
         pump_battery_voltage=(pump.get("battery") or {}).get("voltage")
         if isinstance(pump.get("battery"), dict)
         else None,
-        pump_reservoir_u=pump.get("reservoir"),
-        iob_u=iob_u,
-        cob_g=cob_g,
+        pump_reservoir_u=round(pump.get("reservoir"), 1)
+        if isinstance(pump.get("reservoir"), (int, float))
+        else None,
+        iob_u=round(iob_u, 2) if iob_u is not None else None,
+        cob_g=round(cob_g, 1) if cob_g is not None else None,
         loop_enacted_rate=enacted.get("rate") if isinstance(enacted, dict) else None,
         loop_enacted_duration_min=enacted.get("duration") if isinstance(enacted, dict) else None,
         loop_temp_basal_minutes_remaining=enacted.get("minutesRemaining")
@@ -304,16 +306,46 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
         """Pump / loop / uploader status.
 
         Args:
-            latest: if True (default) return just the most recent row. If False,
-                return the last 10 rows so the LLM can see trends.
+            latest: if True (default) return the most recent row carrying
+                actual loop or pump data. If False, return the last 10 rows.
+
+        When `latest=True` we walk up to 10 recent rows with a tiered
+        preference: loop fields (iob/cob/enacted) beat pump fields
+        (reservoir/battery) beat uploader-only rows. Necessary because
+        AAPS often interleaves rows from the loop instance with rows
+        from the AAPSClient phone, and the chronologically newest row
+        is frequently the latter. See issue #2.
         """
         client = get_client()
-        count = 1 if latest else 10
-        rows = await client.get("/api/v1/devicestatus.json", {"count": count})
+        rows = await client.get("/api/v1/devicestatus.json", {"count": 10})
         flat = [_flatten_device_status(r) for r in rows]
-        if latest:
-            return flat[0] if flat else DeviceStatusSummary()
-        return flat
+        if not flat:
+            return DeviceStatusSummary() if latest else []
+        if not latest:
+            return flat
+
+        def has_loop(ds: DeviceStatusSummary) -> bool:
+            return any(
+                v is not None
+                for v in (ds.iob_u, ds.cob_g, ds.loop_enacted_rate, ds.suggested_temp)
+            )
+
+        def has_pump(ds: DeviceStatusSummary) -> bool:
+            return any(
+                v is not None
+                for v in (ds.pump_reservoir_u, ds.pump_battery_percent)
+            )
+
+        # Tier 1: most recent row with loop data
+        for ds in flat:
+            if has_loop(ds):
+                return ds
+        # Tier 2: most recent row with pump data
+        for ds in flat:
+            if has_pump(ds):
+                return ds
+        # Tier 3: literal latest
+        return flat[0]
 
     @mcp.tool()
     async def get_server_status() -> ServerStatus:

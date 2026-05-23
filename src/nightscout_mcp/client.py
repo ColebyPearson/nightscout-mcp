@@ -9,14 +9,31 @@ never returned to the LLM.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import httpx
 
 from .config import Settings
+from .logging_setup import TokenScrubFilter
 
 # Be polite to free-tier Heroku/Atlas Nightscout instances.
 _DEFAULT_TIMEOUT = httpx.Timeout(connect=5.0, read=15.0, write=10.0, pool=5.0)
+
+
+def _ensure_httpx_logger_scrubbed() -> None:
+    """Attach the token scrub filter to httpx's request logger.
+
+    Idempotent — we check whether a TokenScrubFilter is already attached
+    so repeated NightscoutClient construction (e.g. in tests) doesn't pile
+    on duplicates. This runs regardless of whether `setup_logging()` was
+    called, so even consumers that import nightscout_mcp without going
+    through `main()` (tests, MCP Inspector, custom embeddings) still get
+    scrubbed logs. See issue #3.
+    """
+    httpx_logger = logging.getLogger("httpx")
+    if not any(isinstance(f, TokenScrubFilter) for f in httpx_logger.filters):
+        httpx_logger.addFilter(TokenScrubFilter())
 
 
 class NightscoutClient:
@@ -24,6 +41,7 @@ class NightscoutClient:
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
+        _ensure_httpx_logger_scrubbed()
         self._http = httpx.AsyncClient(
             base_url=settings.base_url,
             timeout=_DEFAULT_TIMEOUT,

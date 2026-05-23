@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import httpx
 import pytest
 import respx
@@ -50,3 +52,34 @@ async def test_get_raises_on_4xx(settings: Settings) -> None:
             await client.get("/api/v1/entries.json")
     finally:
         await client.aclose()
+
+
+def test_client_construction_attaches_scrub_filter_to_httpx_logger(
+    settings: Settings,
+) -> None:
+    """Issue #3: even consumers that bypass setup_logging() (tests, MCP
+    Inspector, custom embeddings) get scrubbed httpx request logs."""
+    from nightscout_mcp.logging_setup import TokenScrubFilter
+
+    httpx_logger = logging.getLogger("httpx")
+    # Remove any existing scrub filter to prove construction adds one.
+    for f in list(httpx_logger.filters):
+        if isinstance(f, TokenScrubFilter):
+            httpx_logger.removeFilter(f)
+
+    NightscoutClient(settings)
+    assert any(isinstance(f, TokenScrubFilter) for f in httpx_logger.filters)
+
+
+def test_client_construction_does_not_duplicate_scrub_filter(
+    settings: Settings,
+) -> None:
+    """Calling NightscoutClient(...) repeatedly must not pile filters."""
+    from nightscout_mcp.logging_setup import TokenScrubFilter
+
+    NightscoutClient(settings)
+    NightscoutClient(settings)
+    NightscoutClient(settings)
+    httpx_logger = logging.getLogger("httpx")
+    count = sum(1 for f in httpx_logger.filters if isinstance(f, TokenScrubFilter))
+    assert count == 1
