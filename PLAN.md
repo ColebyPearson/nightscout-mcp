@@ -26,6 +26,24 @@ A Model Context Protocol server that lets an LLM (Claude Desktop, Claude Code, a
 | Default glucose units | ✅ **mmol/L** | User preference; tools still return both units in payloads |
 | Repo name | ✅ **`nightscout-mcp`** | |
 
+## 2a. Competitive landscape (surveyed 2026-05-22)
+
+Three actual Nightscout MCPs exist publicly, plus one marketplace listing of unclear provenance. Mapping the empty space:
+
+| Niche | Filled by |
+|---|---|
+| TypeScript / analytics-heavy / personal stdio | [`adminpb/Nightscout-MCP`](https://github.com/adminpb/Nightscout-MCP) — 24 tools, no tests, low engagement |
+| Python / Docker remote service / writes incl. destructive | [`easyweek/mcp-nightscout`](https://github.com/easyweek/mcp-nightscout) — 15 tools, HTTP+stdio dual, auth middleware tests only |
+| .NET / **Nocturne** platform / first-party | [`nightscout/nocturne` → `Nocturne.Tools.McpServer`](https://github.com/nightscout/nocturne) — 7 tools, stdio+SSE, "no authentication implemented" |
+| **Python / stdio / personal / safety-first / well-tested / Nightscout v15** | **← This project. No one occupies it.** |
+
+**What we steal:**
+- From `easyweek`: structured JSON logging + token-scrubbing log filter (now formal Phase 1 scope, [§4](#phase-1--read-tools-6h))
+- From `adminpb`: 2 well-named analytics tools added to Phase 2 (`insulin_sensitivity_check`, `compression_low_analysis`) so users coming from the TS world find familiar entry points
+- From `amansk/librelink-mcp-server` (adjacent): explicit "data never leaves your machine" framing and file-permission guidance in README
+
+**What we consciously don't copy:** destructive writes, `API_SECRET` fallback, HTTP transport with auth complexity, tool sprawl without tests.
+
 ## 3. Architecture
 
 ```
@@ -57,13 +75,15 @@ A Model Context Protocol server that lets an LLM (Claude Desktop, Claude Code, a
 - `client.py` async httpx client with one `nightscout_get(path, params)` helper. Confirms reachability against `/api/v1/status.json` on startup.
 - `pyproject.toml` entry point: `nightscout-mcp = "nightscout_mcp.server:main"`.
 
-### Phase 1 — Read tools (≈6h)
+### Phase 1 — Read tools + logging hygiene (≈7h)
+
+**Tools (9):**
 
 | Tool | Signature | Notes |
 |---|---|---|
 | `get_current_glucose` | `() → CurrentGlucose` | Latest SGV; both units; ASCII trend arrow; minutes_ago; delta vs prior |
 | `get_glucose_history` | `(hours: int = 6, count: int \| None = None) → list[Sgv]` | Default 6h; hard-cap count to 2000 to be polite to free-tier instances |
-| `get_glucose_stats` | `(hours: int = 24, tir_low: int = 70, tir_high: int = 180) → GlucoseStats` | mean, SD, CV%, TIR, TBR<70/<54, TAR>180/>250, GMI |
+| `get_glucose_stats` | `(hours: int = 24, tir_low: int = 70, tir_high: int = 180) → GlucoseStats` | mean, SD, CV%, TIR, TBR<70/<54, TAR>180/>250, GMI (folds in `a1c_estimator` equivalent) |
 | `get_treatments` | `(hours: int = 24, event_type: str \| None = None) → list[Treatment]` | Mongo-style `find[created_at][$gte]` filter |
 | `get_iob_cob` | `() → IobCob` | **Reads from latest `devicestatus.openaps`/`pump`/`loop`** — more accurate than re-deriving |
 | `get_current_profile` | `() → Profile` | Basal schedule, ISF, IC, target high/low, DIA, timezone |
@@ -71,9 +91,13 @@ A Model Context Protocol server that lets an LLM (Claude Desktop, Claude Code, a
 | `get_server_status` | `() → ServerStatus` | NS version, units, features — cache 5 min |
 | `search_treatments` | `(query: str, since: datetime \| None, until: datetime \| None) → list[Treatment]` | Free-form note/event search |
 
-### Phase 2 — Analytics tier (≈3h)
+**Logging hygiene (new for Phase 1, lifted from `easyweek`):**
+- `logging_setup.py` with a structured (key=value) formatter and an httpx event hook that scrubs `token=…` from logged URLs before emission. Avoids leaking the token into Claude Desktop's debug log when running under stdio.
+- **Regression test:** assert that no Phase 1 tool response, serialized to JSON, contains the token substring — even by accident.
 
-Mirrors the most useful tools from `adminpb/Nightscout-MCP` but in Python with proper statistics:
+### Phase 2 — Analytics tier (≈4h)
+
+Mirrors the most useful tools from `adminpb/Nightscout-MCP` but in Python with proper statistics. Tool *names* deliberately match adminpb's where possible so users coming from the TS world find familiar entry points.
 
 | Tool | Signature | Notes |
 |---|---|---|
@@ -82,6 +106,8 @@ Mirrors the most useful tools from `adminpb/Nightscout-MCP` but in Python with p
 | `analyze_meal` | `(meal_time: datetime, window_hours: int = 4) → MealAnalysis` | Peak, time-to-peak, rise, recovery, bolus assessment |
 | `overnight_analysis` | `(date: date) → OvernightAnalysis` | Stability, drift, dawn effect, basal adequacy proxy |
 | `get_daily_report` | `(date: date) → DailyReport` | Stats + treatments + events for a 24h window |
+| `insulin_sensitivity_check` | `(days: int = 14) → IsfDerivation` | **Derives *real* ISF from correction-bolus outcomes** vs. profile-stated ISF. Genuinely clever — one of the strongest tools adminpb ships. |
+| `compression_low_analysis` | `(days: int = 14) → list[SuspectedCompression]` | Detects false-low sensor compression artifacts (lying on sensor at night) — adminpb's most differentiated analytical tool. Stretch goal. |
 
 GMI formula: `GMI(%) = 3.31 + 0.02392 × mean_mgdl` (Bergenstal et al., *Diabetes Care* 2018; 41:2275–2280).
 
@@ -155,9 +181,8 @@ This is health data on a public repo — non-negotiables:
 
 ## 10. Next actions
 
-1. You answer items 1–5 in [§9](#9-open-items).
-2. I scaffold Phase 0 on branch `feat/phase-0-foundations`: `pyproject.toml`, `.env.example`, `.gitignore`, `config.py`, `client.py`, smoke test against your NS.
-3. PR #1 (Phase 0) → self-review → merge.
-4. Phase 1 read tools on `feat/phase-1-read-tools`. PR #2.
-5. Phase 2 analytics on `feat/phase-2-analytics`. PR #3.
-6. README polish + Claude Desktop screenshot for the portfolio angle.
+1. ✅ Phase 0 scaffold committed to main (`56710e0`, `31a207d`). Live `health_check` verified against `gladoctopus.my.nightscoutpro.com` (Nightscout v15.0.5). 8/8 tests passing.
+2. **▶ Phase 1 read tools + logging hygiene on `feat/phase-1-read-tools`. PR #1.**
+3. Phase 2 analytics (incl. `insulin_sensitivity_check`, optional `compression_low_analysis`) on `feat/phase-2-analytics`. PR #2.
+4. README polish + Claude Desktop config screenshot for the portfolio angle. PR #3.
+5. (Optional) Publish to PyPI as `nightscout-mcp` once Phase 2 is stable.
