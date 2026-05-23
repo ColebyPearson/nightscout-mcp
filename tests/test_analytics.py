@@ -254,6 +254,38 @@ def test_compression_low_detects_fast_drop_and_recovery() -> None:
     assert r.suspected[0].min_mgdl == 50
 
 
+def test_compression_low_suppresses_when_carb_treatment_explains_recovery() -> None:
+    """A textbook compression pattern is NOT flagged when a carb treatment
+    landed near the minimum — that explains the recovery (real treated low)."""
+    base = datetime(2026, 5, 22, 2, 0, tzinfo=UTC)
+    sgvs = [
+        _sgv(105, base - timedelta(minutes=10)),
+        _sgv(100, base - timedelta(minutes=5)),
+        _sgv(50, base),
+        _sgv(100, base + timedelta(minutes=5)),
+        _sgv(105, base + timedelta(minutes=10)),
+    ]
+    # User treated the low with 15g carbs at the moment of the minimum.
+    txs = [_tx("Carb Correction", base + timedelta(minutes=2), carbs=15)]
+    r = compression_low_analysis(1, sgvs, treatments=txs)
+    assert len(r.suspected) == 0
+
+
+def test_compression_low_still_flags_when_treatments_are_far_from_minimum() -> None:
+    """A carb treatment 1 hour earlier doesn't explain this dip's recovery."""
+    base = datetime(2026, 5, 22, 2, 0, tzinfo=UTC)
+    sgvs = [
+        _sgv(105, base - timedelta(minutes=10)),
+        _sgv(100, base - timedelta(minutes=5)),
+        _sgv(50, base),
+        _sgv(100, base + timedelta(minutes=5)),
+        _sgv(105, base + timedelta(minutes=10)),
+    ]
+    txs = [_tx("Carb Correction", base - timedelta(hours=1), carbs=20)]
+    r = compression_low_analysis(1, sgvs, treatments=txs)
+    assert len(r.suspected) == 1
+
+
 def test_compression_low_does_not_flag_slow_real_hypo() -> None:
     """A real hypo: gradual drop, slow recovery over an hour — NOT a compression."""
     base = datetime(2026, 5, 22, 2, 0, tzinfo=UTC)
