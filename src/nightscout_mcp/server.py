@@ -16,6 +16,7 @@ from mcp.server.fastmcp import FastMCP
 from .client import NightscoutClient
 from .config import Settings, load_settings
 from .logging_setup import setup_logging
+from .tools import analytics as analytics_tools
 from .tools import read as read_tools
 
 _log = logging.getLogger(__name__)
@@ -37,6 +38,7 @@ def _get_client() -> NightscoutClient:
 
 mcp = FastMCP("nightscout-mcp")
 read_tools.register(mcp, _get_client)
+analytics_tools.register(mcp, _get_client)
 
 
 def _cleanup_client() -> None:
