@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  # Cancel superseded runs on the same branch to save Actions minutes.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest (py${{ matrix.python }} on ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python: ["3.11", "3.12", "3.13"]
+        # Also exercise Windows on one Python — most users are on Windows or macOS,
+        # not Linux. CRLF vs LF gotchas have bitten us before.
+        include:
+          - os: windows-latest
+            python: "3.12"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Install Python ${{ matrix.python }}
+        run: uv python install ${{ matrix.python }}
+
+      - name: Sync dependencies
+        run: uv sync --extra dev --python ${{ matrix.python }}
+
+      - name: Run tests
+        run: uv run --python ${{ matrix.python }} pytest -v
+
+  lint:
+    name: ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - run: uv sync --extra dev
+      - run: uv run ruff check .

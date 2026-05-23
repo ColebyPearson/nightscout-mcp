@@ -27,8 +27,7 @@ htmlcov/
 .mypy_cache/
 .ruff_cache/
 
-# uv
-uv.lock
+# uv: keep uv.lock committed for reproducible builds + CI caching
 
 # Logs
 *.log

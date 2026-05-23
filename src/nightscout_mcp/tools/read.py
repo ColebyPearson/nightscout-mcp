@@ -11,7 +11,7 @@ production wires in the real httpx-backed client, tests pass a stub.
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from ..client import NightscoutClient
@@ -35,12 +35,12 @@ MAX_TREATMENT_COUNT = 2000
 
 
 def _now_utc() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _iso_z(dt: datetime) -> str:
     """ISO8601 with Z suffix — for `find[created_at][$gte]` (treatments)."""
-    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
 def _unix_ms(dt: datetime) -> int:

@@ -189,9 +189,7 @@ async def test_get_glucose_history_passes_window_filter(
     assert len(history) == 2
     # The 24h ago filter param must be on the wire.
     params = route.calls.last.request.url.params
-    assert "find[dateString][$gte]" in str(params) or any(
-        "find" in k for k in params.keys()
-    )
+    assert "find[dateString][$gte]" in str(params) or any("find" in k for k in params)
 
 
 @pytest.mark.asyncio
