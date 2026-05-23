@@ -3,6 +3,10 @@
 .env.*
 !.env.example
 
+# Private working notes — competitive analysis, opinions, scratch
+LANDSCAPE.md
+notes/
+
 # Python
 __pycache__/
 *.py[cod]
