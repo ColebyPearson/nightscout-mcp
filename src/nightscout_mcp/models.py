@@ -167,6 +167,121 @@ class GlucoseStats(BaseModel):
 # --- Server status -----------------------------------------------------------
 
 
+# --- Phase 2 analytics models ------------------------------------------------
+
+
+class DailyReport(BaseModel):
+    """One-day rollup: stats + treatments + key events."""
+
+    date: str  # YYYY-MM-DD
+    stats: "GlucoseStats"
+    treatment_count: int
+    total_insulin_u: float
+    total_carbs_g: float
+    notes: list[str]
+
+
+class PeriodComparison(BaseModel):
+    """Side-by-side stats over two arbitrary date ranges."""
+
+    period_a_label: str
+    period_b_label: str
+    period_a: "GlucoseStats"
+    period_b: "GlucoseStats"
+    delta_mean_mgdl: float
+    delta_tir_pp: float  # percentage points
+    delta_gmi_pp: float
+    improvement_summary: str  # human-readable
+
+
+class MealAnalysis(BaseModel):
+    """Glucose response in a window after a meal/carb entry."""
+
+    meal_time_iso: str
+    window_hours: int
+    carbs_g: float | None
+    insulin_u: float | None
+    pre_meal_mgdl: int | None
+    pre_meal_mmol: float | None
+    peak_mgdl: int
+    peak_mmol: float
+    peak_at_iso: str
+    time_to_peak_minutes: int
+    rise_mgdl: int  # peak - pre_meal
+    end_mgdl: int  # value at end of window
+    end_mmol: float
+    in_range_at_end: bool
+    notes: list[str]
+
+
+class OvernightAnalysis(BaseModel):
+    """Stability + drift + dawn-effect characterization for a single night.
+
+    "Night" = 00:00–07:00 local-equivalent UTC for the requested date.
+    """
+
+    night_date: str  # YYYY-MM-DD
+    reading_count: int
+    start_mgdl: int | None
+    end_mgdl: int | None
+    drift_mgdl: int | None  # end - start
+    min_mgdl: int | None
+    max_mgdl: int | None
+    time_below_70_minutes: int
+    time_below_54_minutes: int
+    dawn_rise_mgdl: int | None  # value at 07:00 - value at 03:00
+    flat_pct: float  # share of intervals where |delta| ≤ 5 mg/dL
+
+
+class Pattern(BaseModel):
+    """A single recurring glucose pattern detected over multiple days."""
+
+    type: str  # e.g. "overnight_low", "dawn_phenomenon", "post_meal_spike"
+    occurrence_count: int
+    sample_times_iso: list[str]
+    avg_value_mgdl: float
+    description: str
+
+
+class DetectedPatterns(BaseModel):
+    """Output of detect_patterns — grouped by pattern type."""
+
+    days_analyzed: int
+    patterns: list[Pattern]
+
+
+class IsfDerivation(BaseModel):
+    """Real-world ISF derived from correction-bolus outcomes."""
+
+    sample_count: int  # eligible correction boluses
+    derived_isf_mgdl_per_unit: float | None
+    derived_isf_mmol_per_unit: float | None
+    profile_isf_mmol_per_unit: float | None
+    ratio_derived_over_profile: float | None  # >1 means LESS sensitive than profile
+    confidence: str  # "low" | "medium" | "high"
+    recommendation: str
+
+
+class SuspectedCompression(BaseModel):
+    """One CGM dip that looks like a sensor-compression artifact."""
+
+    start_iso: str
+    min_iso: str
+    min_mgdl: int
+    recovery_iso: str
+    drop_rate_mgdl_per_min: float
+    recovery_rate_mgdl_per_min: float
+    duration_minutes: int
+
+
+class CompressionAnalysis(BaseModel):
+    """Output of compression_low_analysis."""
+
+    days_analyzed: int
+    suspected: list[SuspectedCompression]
+    note: str
+
+
 class ServerStatus(BaseModel):
     """A subset of /api/v1/status.json that's actually useful."""
 
