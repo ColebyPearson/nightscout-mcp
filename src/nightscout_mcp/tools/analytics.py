@@ -45,7 +45,8 @@ from ..models import (
     parse_iso_to_utc,
 )
 
-MAX_ENTRY_COUNT = 2000
+MAX_ENTRY_COUNT_PER_PAGE = 2000
+PAGINATION_TOTAL_CAP = 20000  # safety bound; ~14 days at 1min cadence = 20K
 
 
 def _unix_ms(dt: datetime) -> int:
@@ -56,54 +57,143 @@ def _iso_z(dt: datetime) -> str:
     return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
-def _parse_date(s: str) -> datetime:
+def _parse_date_utc_midnight(s: str) -> datetime:
     """Accept YYYY-MM-DD and return a UTC midnight datetime."""
     return datetime.fromisoformat(s).replace(tzinfo=UTC)
+
+
+def _parse_date_in_timezone(s: str, tz_name: str | None) -> datetime:
+    """Interpret YYYY-MM-DD as local midnight in the given timezone,
+    convert to a UTC datetime. Falls back to UTC if no timezone is given.
+    """
+    if not tz_name:
+        return _parse_date_utc_midnight(s)
+    try:
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+        try:
+            tz = ZoneInfo(tz_name)
+        except ZoneInfoNotFoundError:
+            return _parse_date_utc_midnight(s)
+    except ImportError:
+        return _parse_date_utc_midnight(s)
+    naive = datetime.fromisoformat(s)
+    local_midnight = naive.replace(tzinfo=tz)
+    return local_midnight.astimezone(UTC)
+
+
+async def _resolve_timezone(client: NightscoutClient) -> str | None:
+    """Look up the user's timezone from the active profile. Caller passes the
+    result through to _parse_date_in_timezone.
+    """
+    try:
+        profile = await client.get("/api/v1/profile.json")
+        record = profile[0] if isinstance(profile, list) and profile else profile
+        sub = (record.get("store") or {}).get(record.get("defaultProfile", "Default"))
+        if sub and sub.get("timezone"):
+            return sub["timezone"]
+    except (AttributeError, KeyError, IndexError, TypeError):
+        pass
+    return None
 
 
 async def _fetch_sgvs_between(
     client: NightscoutClient, start: datetime, end: datetime
 ) -> list[Sgv]:
-    """Fetch SGVs in [start, end). 5min cadence → ~13/hr; cap at 2000."""
-    hours = max(1, int((end - start).total_seconds() // 3600))
-    count = min(hours * 13, MAX_ENTRY_COUNT)
-    rows = await client.get(
-        "/api/v1/entries/sgv.json",
-        {
-            "count": count,
-            "find[date][$gte]": _unix_ms(start),
-            "find[date][$lt]": _unix_ms(end),
-        },
-    )
-    return [Sgv.model_validate(r) for r in rows]
+    """Fetch SGVs in [start, end), paginating through Nightscout's per-request cap.
+
+    Single requests are capped at 2000 rows by Nightscout's API3_MAX_LIMIT
+    (and most default deployments). We page backwards through the window
+    until either no more rows return or we hit the safety bound (20K rows,
+    ~14 days at 1-minute CGM cadence).
+    """
+    all_rows: list[dict[str, Any]] = []
+    current_end = end
+    seen_ids: set[str] = set()
+    while True:
+        page = await client.get(
+            "/api/v1/entries/sgv.json",
+            {
+                "count": MAX_ENTRY_COUNT_PER_PAGE,
+                "find[date][$gte]": _unix_ms(start),
+                "find[date][$lt]": _unix_ms(current_end),
+            },
+        )
+        if not page:
+            break
+        # Dedup defensively — Nightscout sometimes returns boundary rows twice.
+        fresh = [r for r in page if (r.get("_id") or str(r.get("date"))) not in seen_ids]
+        for r in fresh:
+            seen_ids.add(r.get("_id") or str(r.get("date")))
+        all_rows.extend(fresh)
+        if len(page) < MAX_ENTRY_COUNT_PER_PAGE:
+            break  # got all available in window
+        if len(all_rows) >= PAGINATION_TOTAL_CAP:
+            break  # safety bound
+        oldest_ms = min(int(r.get("date", 0)) for r in page)
+        next_end = datetime.fromtimestamp(oldest_ms / 1000, tz=UTC)
+        if next_end >= current_end:
+            break  # not making progress
+        current_end = next_end
+    return [Sgv.model_validate(r) for r in all_rows]
 
 
 async def _fetch_treatments_between(
     client: NightscoutClient, start: datetime, end: datetime
 ) -> list[Treatment]:
-    rows = await client.get(
-        "/api/v1/treatments.json",
-        {
-            "count": MAX_ENTRY_COUNT,
-            "find[created_at][$gte]": _iso_z(start),
-            "find[created_at][$lt]": _iso_z(end),
-        },
-    )
-    return [Treatment.model_validate(r) for r in rows]
+    """Paginated treatment fetch in [start, end). Same approach as SGVs."""
+    all_rows: list[dict[str, Any]] = []
+    current_end = end
+    seen_ids: set[str] = set()
+    while True:
+        page = await client.get(
+            "/api/v1/treatments.json",
+            {
+                "count": MAX_ENTRY_COUNT_PER_PAGE,
+                "find[created_at][$gte]": _iso_z(start),
+                "find[created_at][$lt]": _iso_z(current_end),
+            },
+        )
+        if not page:
+            break
+        fresh = [r for r in page if (r.get("_id") or r.get("created_at")) not in seen_ids]
+        for r in fresh:
+            seen_ids.add(r.get("_id") or r.get("created_at"))
+        all_rows.extend(fresh)
+        if len(page) < MAX_ENTRY_COUNT_PER_PAGE:
+            break
+        if len(all_rows) >= PAGINATION_TOTAL_CAP:
+            break
+        oldest_iso = min(r.get("created_at", "") for r in page)
+        if not oldest_iso:
+            break
+        try:
+            next_end = parse_iso_to_utc(oldest_iso)
+        except Exception:
+            break
+        if next_end >= current_end:
+            break
+        current_end = next_end
+    return [Treatment.model_validate(r) for r in all_rows]
 
 
 def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
     """Attach all Phase 2 analytics tools to the FastMCP instance."""
 
     @mcp.tool()
-    async def get_daily_report(date: str) -> DailyReport:
+    async def get_daily_report(date: str, timezone: str | None = None) -> DailyReport:
         """One-day glucose stats + treatment summary + notes.
 
         Args:
-            date: YYYY-MM-DD (interpreted as UTC for consistency).
+            date: YYYY-MM-DD.
+            timezone: Olson timezone name (e.g. "America/Toronto"). If None,
+                we auto-detect from your Nightscout profile, falling back to
+                UTC if no profile timezone is set. The "day" boundary is
+                local midnight to local midnight.
         """
         client = get_client()
-        start = _parse_date(date)
+        tz_name = timezone or await _resolve_timezone(client)
+        start = _parse_date_in_timezone(date, tz_name)
         end = start + timedelta(days=1)
         sgvs, txs = await _fetch_sgvs_between(client, start, end), await _fetch_treatments_between(
             client, start, end
@@ -118,6 +208,7 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
         period_b_end: str,
         period_a_label: str = "A",
         period_b_label: str = "B",
+        timezone: str | None = None,
     ) -> PeriodComparison:
         """Side-by-side glucose stats comparison between two date ranges.
 
@@ -127,12 +218,16 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
             period_b_start: YYYY-MM-DD inclusive
             period_b_end:   YYYY-MM-DD exclusive
             period_a_label, period_b_label: human labels (e.g. "last_week").
+            timezone: Olson zone name; if None, auto-detect from profile.
 
         Both periods MUST be the same length; otherwise stats aren't comparable.
         """
         client = get_client()
-        a_start, a_end = _parse_date(period_a_start), _parse_date(period_a_end)
-        b_start, b_end = _parse_date(period_b_start), _parse_date(period_b_end)
+        tz_name = timezone or await _resolve_timezone(client)
+        a_start = _parse_date_in_timezone(period_a_start, tz_name)
+        a_end = _parse_date_in_timezone(period_a_end, tz_name)
+        b_start = _parse_date_in_timezone(period_b_start, tz_name)
+        b_end = _parse_date_in_timezone(period_b_end, tz_name)
         if (a_end - a_start) != (b_end - b_start):
             raise ValueError(
                 "compare_periods requires equal-length periods; "
@@ -147,17 +242,22 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
 
     @mcp.tool()
     async def analyze_meal(
-        meal_time_iso: str, window_hours: int = 4
+        meal_time_iso: str,
+        window_hours: int = 4,
+        match_window_minutes: int = 30,
     ) -> MealAnalysis:
         """Glucose response in a window after a meal/carb entry.
 
         Args:
             meal_time_iso: ISO8601 (e.g. "2026-05-22T18:30:00Z"). We look for
                 a matching Carb Correction / Meal Bolus treatment within
-                ±15 min of this time and analyze the BG response over the
-                next `window_hours` hours.
+                ±match_window_minutes of this time and analyze the BG response
+                over the next `window_hours` hours.
             window_hours: default 4. Tighter = misses tail recovery; longer
                 = picks up an unrelated subsequent meal.
+            match_window_minutes: how loosely to associate the timestamp with
+                a logged treatment. Default 30 (was 15 — too tight in practice;
+                users frequently log carbs 20-30 min late).
         """
         client = get_client()
         meal_time = parse_iso_to_utc(meal_time_iso)
@@ -166,8 +266,8 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
         sgvs = await _fetch_sgvs_between(client, bracket_start, bracket_end)
 
         # Look for a treatment near meal_time with carbs or matching eventType
-        tx_window_start = meal_time - timedelta(minutes=15)
-        tx_window_end = meal_time + timedelta(minutes=15)
+        tx_window_start = meal_time - timedelta(minutes=match_window_minutes)
+        tx_window_end = meal_time + timedelta(minutes=match_window_minutes)
         txs = await _fetch_treatments_between(client, tx_window_start, tx_window_end)
         candidates = [
             t
@@ -179,16 +279,20 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
         return _analyze_meal(meal_time, meal, sgvs, window_hours)
 
     @mcp.tool()
-    async def overnight_analysis(date: str) -> OvernightAnalysis:
-        """Characterize the overnight window (00:00-07:00 UTC) for one date.
+    async def overnight_analysis(
+        date: str, timezone: str | None = None
+    ) -> OvernightAnalysis:
+        """Characterize the overnight window (00:00-07:00 local) for one date.
 
         Args:
-            date: YYYY-MM-DD (interpreted as UTC).
+            date: YYYY-MM-DD.
+            timezone: Olson zone name; if None, auto-detect from profile.
 
         Returns drift, min/max, time in low ranges, and dawn-rise magnitude.
         """
         client = get_client()
-        start = _parse_date(date)
+        tz_name = timezone or await _resolve_timezone(client)
+        start = _parse_date_in_timezone(date, tz_name)
         end = start + timedelta(hours=7)
         sgvs = await _fetch_sgvs_between(client, start, end)
         return _overnight_analysis(date, sgvs)
@@ -288,7 +392,9 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
 
         Heuristic: fast drop ≥30 mg/dL in ≤15 min into the low band, then
         equally fast recovery within 15 min. Real hypos don't bounce back
-        that fast without intervention.
+        that fast *without intervention* — so we also cross-check treatments:
+        candidates where a carb treatment (>10g) landed within ±15 min of
+        the minimum are suppressed (those were real lows the user treated).
 
         Args:
             days: lookback window. Default 14, max 30.
@@ -298,4 +404,5 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
         end = datetime.now(UTC)
         start = end - timedelta(days=days)
         sgvs = await _fetch_sgvs_between(client, start, end)
-        return _compression_low_analysis(days, sgvs)
+        txs = await _fetch_treatments_between(client, start, end)
+        return _compression_low_analysis(days, sgvs, treatments=txs)

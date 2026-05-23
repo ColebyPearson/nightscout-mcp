@@ -660,13 +660,20 @@ def carb_ratio_check(
 
 
 def compression_low_analysis(
-    days: int, sgvs: list[Sgv]
+    days: int,
+    sgvs: list[Sgv],
+    treatments: list[Treatment] | None = None,
 ) -> CompressionAnalysis:
     """Flag CGM dips that look like sensor-compression artifacts.
 
     Heuristic: a fast drop (≥30 mg/dL in ≤15 min) to below 70 mg/dL
     followed by an equally fast recovery (≥30 mg/dL in ≤15 min) within
-    a 30-min total episode duration. Real hypos don't recover that fast.
+    a 30-min total episode duration. Real hypos don't recover that fast
+    *without intervention*.
+
+    When `treatments` is provided, we suppress candidates where a carb
+    treatment (>10g) landed within ±15 min of the minimum — that explains
+    the recovery and the dip was likely a real low the user treated.
     """
     sorted_r = sorted(sgvs, key=lambda r: parse_iso_to_utc(r.date_iso))
     suspected: list[SuspectedCompression] = []
@@ -718,6 +725,21 @@ def compression_low_analysis(
             and recovery_rate >= COMPRESSION_RECOVERY_MGDL_PER_MIN
             and total_duration <= COMPRESSION_MAX_DURATION_MIN
         ):
+            # If we have treatments to cross-check, suppress this candidate
+            # when a carb treatment >10g landed within ±15 min of the minimum.
+            # That explains the recovery as a real treated low, not compression.
+            if treatments:
+                min_dt = parse_iso_to_utc(min_r.date_iso)
+                treated = any(
+                    t.carbs
+                    and t.carbs > 10
+                    and abs((parse_iso_to_utc(t.created_at) - min_dt).total_seconds()) <= 15 * 60
+                    for t in treatments
+                    if t.created_at
+                )
+                if treated:
+                    i += 1
+                    continue
             suspected.append(
                 SuspectedCompression(
                     start_iso=start.date_iso,
