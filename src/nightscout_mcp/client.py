@@ -45,7 +45,9 @@ class NightscoutClient:
         self._http = httpx.AsyncClient(
             base_url=settings.base_url,
             timeout=_DEFAULT_TIMEOUT,
-            headers={"User-Agent": "nightscout-mcp/0.1.0 (+https://github.com)"},
+            headers={
+                "User-Agent": "nightscout-mcp/0.2.0 (+https://github.com/ColebyPearson/nightscout-mcp)"
+            },
         )
 
     @property

@@ -2,51 +2,126 @@
 
 > A [Model Context Protocol](https://modelcontextprotocol.io) server that lets an LLM (Claude Desktop, Claude Code, any MCP client) read glucose, treatments, and derived analytics from a personal [Nightscout](https://github.com/nightscout/cgm-remote-monitor) instance.
 
-**Status:** 🚧 Alpha — Phase 0 scaffolding. See [PLAN.md](./PLAN.md) for the full roadmap.
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+[![Tests: 75 passing](https://img.shields.io/badge/tests-75%20passing-brightgreen)](./tests)
+[![MCP](https://img.shields.io/badge/MCP-compatible-9cf)](https://modelcontextprotocol.io)
 
-## ⚠️ Disclaimer
+## ⚠️ Not a medical device
 
-This tool reads from your Nightscout instance and surfaces glucose data to an LLM. **It is not a medical device, does not provide clinical advice, and must not be used to make treatment decisions.** Nightscout itself states it "currently makes no attempt at HIPAA privacy compliance" and is intended for educational use only. Use at your own risk.
+This tool reads CGM data and surfaces it to an LLM. **It is not a medical device, does not provide clinical advice, and must not be used to make treatment decisions.** Nightscout itself states it "currently makes no attempt at HIPAA privacy compliance" and is intended for educational use only. Use at your own risk.
 
-## What it does (Phase 1 + 2 — coming)
+## What you get
 
-Read-only MCP tools backed by the Nightscout REST API v1:
+**16 read-only MCP tools** spanning live data, history, and analytics. The LLM can ask things like *"What's my current BG and how much insulin is on board?"* or *"Has the dawn phenomenon hit me on more than half the mornings this week?"* and get back structured answers backed by real Nightscout queries.
 
-- `get_current_glucose` — latest SGV with trend, delta, age
-- `get_glucose_history` — time-series SGVs over a window
-- `get_glucose_stats` — mean, SD, CV%, TIR, GMI, TBR/TAR breakdowns
-- `get_treatments` — boluses, carbs, basals, notes
-- `get_iob_cob` — insulin/carbs on board (from `devicestatus`)
-- `get_current_profile` — basal schedule, ISF, IC, DIA
-- `get_device_status` — pump/loop/uploader state
-- `get_server_status` — Nightscout version, units, features
-- `search_treatments` — free-form retrieval
-- *Analytics (Phase 2):* `detect_patterns`, `compare_periods`, `analyze_meal`, `overnight_analysis`, `get_daily_report`
+### Read tools (9)
 
-Writes are deferred. See [PLAN.md §4 Phase 3](./PLAN.md) for the rationale.
+| Tool | Returns |
+|---|---|
+| `health_check` | NS reachability + version + units |
+| `get_current_glucose` | Latest SGV + trend arrow + freshness + delta vs prior |
+| `get_glucose_history` | Time-series SGVs over a window |
+| `get_glucose_stats` | TIR / TBR / TAR / SD / CV / GMI (A1C estimate) over a window |
+| `get_treatments` | Boluses / carbs / basals / notes |
+| `get_iob_cob` | Insulin- and carbs-on-board from `devicestatus` |
+| `get_current_profile` | Basal schedule / ISF / CR / targets / DIA / timezone |
+| `get_device_status` | Pump / loop / uploader state (tiered priority for loop data) |
+| `get_server_status` | Nightscout version, status, configured units |
+| `search_treatments` | Free-form substring across notes / event types |
 
-## Install (once Phase 0 lands on GitHub)
+### Analytics tools (7)
 
-```bash
-uv tool install nightscout-mcp
+| Tool | Returns |
+|---|---|
+| `get_daily_report` | One-day stats + treatment totals + filtered user notes |
+| `compare_periods` | Side-by-side stats with plain-English delta summary |
+| `analyze_meal` | Pre-meal BG / peak / time-to-peak / rise / recovery / notes |
+| `overnight_analysis` | Drift / min/max / time-below / dawn rise / flatness |
+| `detect_patterns` | Recurring overnight lows, dawn phenomenon, post-meal spikes |
+| `insulin_sensitivity_check` | **Real-world ISF derived from correction-bolus outcomes** + comparison to profile |
+| `compression_low_analysis` | Suspected sensor-compression artifacts (false lows) |
+
+## Example: what the LLM actually sees
+
+`insulin_sensitivity_check(days=14)` against a personal Nightscout instance returns something like:
+
+```json
+{
+  "sample_count": 37,
+  "derived_isf_mgdl_per_unit": 304.7,
+  "derived_isf_mmol_per_unit": 16.9,
+  "profile_isf_mmol_per_unit": 14.0,
+  "ratio_derived_over_profile": 1.21,
+  "confidence": "high",
+  "recommendation": "Derived ISF suggests you're MORE sensitive than your profile says (each unit drops you further). Consider lowering profile ISF or reviewing for overcorrections."
+}
 ```
 
-Or from source:
+`detect_patterns(days=7)` surfaces things like:
+
+```json
+{
+  "type": "post_meal_spike",
+  "occurrence_count": 7,
+  "avg_value_mgdl": 73.6,
+  "description": "Rapid rises >50 mg/dL within 30 min seen on 7 of 7 days. Bolus-to-eat timing may benefit from a longer pre-bolus."
+}
+```
+
+These aren't generic — they're computed from the user's actual outcomes, not their profile claims.
+
+## Why this exists
+
+There are a few other Nightscout MCPs in the wild:
+- **`adminpb/Nightscout-MCP`** (TypeScript) — 24 tools, but no tests visible
+- **`easyweek/mcp-nightscout`** (Python, HTTP+Docker) — built for shared/remote deployment, ships destructive writes including `remove_treatment`
+- **`nightscout/nocturne`** (C#/.NET) — first-party but targets the future Nocturne platform, not v15
+
+This project takes a deliberately different slot:
+
+| Axis | This project |
+|---|---|
+| Transport | **stdio** — no exposed network surface |
+| Auth | **Token only** — refuses `API_SECRET` (least privilege) |
+| Writes | **None** — provably safer for personal/educational use |
+| Tests | **75 passing** including a cross-tool token-leak regression |
+| Default units | **mmol/L** (overridable) — every payload includes both |
+| Analytics | **Real-world ISF**, compression-low detection, recurring pattern detection |
+
+## Install
 
 ```bash
-git clone https://github.com/<user>/nightscout-mcp
+git clone https://github.com/ColebyPearson/nightscout-mcp
 cd nightscout-mcp
 uv sync
 ```
 
+(PyPI publication planned — see [PLAN.md §10](./PLAN.md).)
+
 ## Configure
 
-1. In Nightscout → **Admin Tools → Subjects**, create a token with the `readable` role (e.g. `mcp-reader`).
-2. Copy `.env.example` to `.env` and fill in `NIGHTSCOUT_URL` (must be `https://`) and `NIGHTSCOUT_TOKEN`.
+1. In Nightscout → **Admin Tools → Subjects**, create a token with the **`readable`** role (e.g. `mcp-reader`).
+2. Copy `.env.example` to `.env` and fill in:
+
+```ini
+NIGHTSCOUT_URL=https://your-nightscout.example.com   # MUST be https://
+NIGHTSCOUT_TOKEN=mcp-reader-xxxxxxxxxx               # Never use API_SECRET
+NIGHTSCOUT_UNITS=mmol/L                              # or mg/dL
+```
+
+3. **Protect the file.** Your token lets anyone read your CGM data. Same precaution as `~/.ssh/`:
+
+```bash
+chmod 600 .env     # macOS / Linux
+icacls .env /inheritance:r /grant:r "%USERNAME%:R"     # Windows PowerShell
+```
+
+`.env` is gitignored from `.gitignore:2` — it won't be committed even by accident.
 
 ## Run
 
-### MCP Inspector (development)
+### MCP Inspector (development / manual testing)
 
 ```bash
 uv run mcp dev src/nightscout_mcp/server.py
@@ -72,12 +147,41 @@ Add to `claude_desktop_config.json` (macOS: `~/Library/Application Support/Claud
 }
 ```
 
+Restart Claude Desktop. The 16 tools appear under the 🔌 menu.
+
+### Claude Code
+
+```bash
+claude mcp add nightscout --env NIGHTSCOUT_URL=https://… --env NIGHTSCOUT_TOKEN=… -- uv --directory /abs/path/to/nightscout-mcp run nightscout-mcp
+```
+
 ## Safety model
 
-- Token lives in env vars only; never returned to the LLM in tool responses.
-- `NIGHTSCOUT_URL` must be `https://` — the server refuses to start otherwise.
-- Use a `readable`-role access token, never the raw `API_SECRET`.
-- All numeric outputs include both `mg/dL` and `mmol/L` regardless of `NIGHTSCOUT_UNITS`.
+What this project does to protect your data:
+
+- **`NIGHTSCOUT_URL` must be `https://`** — refuses to start otherwise.
+- **Token never enters LLM context.** It's used only as a `?token=…` query parameter on outbound HTTPS calls. Tool responses contain only derived data.
+- **Token never appears in logs.** A regex filter on the httpx logger replaces `token=…`, `Bearer …`, and `api-secret: …` values with `***` before emission. There's a unit test that asserts this.
+- **Token never appears in any tool response.** There's a cross-tool regression test that sets a canary token, calls every tool, JSON-serializes the response, and asserts the canary doesn't appear.
+- **Read-only by design.** Write tools are not imported. Even if `NIGHTSCOUT_ALLOW_WRITES=true` were set, nothing would happen.
+- **Local-only by default.** stdio transport means there's no listening port. Your data stays on your machine + your Nightscout host.
+
+What this project does *not* do:
+
+- Encrypt your `.env` at rest (use OS file permissions)
+- Detect token compromise (rotate via Admin Tools if you suspect leakage)
+- Replace clinical judgment (it's not a medical device)
+
+## Develop
+
+```bash
+uv sync --extra dev
+uv run pytest                            # all 75 tests
+uv run pytest tests/test_analytics.py    # just analytics
+uv run ruff check .                      # lint
+```
+
+Architecture: [PLAN.md](./PLAN.md). Issue-driven workflow with self-reviewed PRs.
 
 ## License
 
@@ -85,6 +189,11 @@ Add to `claude_desktop_config.json` (macOS: `~/Library/Application Support/Claud
 
 ## Acknowledgments
 
-- The [Nightscout Foundation](https://nightscout.github.io/) and the wider #WeAreNotWaiting community.
-- [`adminpb/Nightscout-MCP`](https://github.com/adminpb/Nightscout-MCP) — TypeScript prior art that informed the tool surface.
-- [FastMCP](https://gofastmcp.com) / the [official MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk).
+- The [Nightscout Foundation](https://nightscout.github.io/) and the wider **#WeAreNotWaiting** community — for building the platform this MCP rides on top of.
+- [`adminpb/Nightscout-MCP`](https://github.com/adminpb/Nightscout-MCP) — TypeScript prior art that informed several tool names.
+- [`easyweek/mcp-nightscout`](https://github.com/easyweek/mcp-nightscout) — the JSON-log-scrubbing pattern.
+- [`amansk/librelink-mcp-server`](https://github.com/amansk/librelink-mcp-server) — the "data never leaves your machine" credential-security framing.
+- The [official MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk) and the FastMCP decorator API.
+- Bergenstal et al., *Diabetes Care* 2018; 41:2275–2280 — for the GMI formula used in `get_glucose_stats`.
+
+> **Why I built this:** I wanted an LLM analyst that could reason over my actual Nightscout history without me having to copy-paste CSVs. The existing options either had no tests, shipped destructive writes, or targeted a future platform. So I built the one I wanted to use.

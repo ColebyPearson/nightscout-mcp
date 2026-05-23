@@ -1,6 +1,6 @@
 [project]
 name = "nightscout-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "Model Context Protocol server for Nightscout — lets LLMs read glucose, treatments, and analytics from a personal Nightscout instance."
 readme = "README.md"
 license = { text = "MIT" }
@@ -37,9 +37,9 @@ dev = [
 nightscout-mcp = "nightscout_mcp.server:main"
 
 [project.urls]
-# Set once the GitHub repo exists:
-# Homepage = "https://github.com/<user>/nightscout-mcp"
-# Issues = "https://github.com/<user>/nightscout-mcp/issues"
+Homepage = "https://github.com/ColebyPearson/nightscout-mcp"
+Issues = "https://github.com/ColebyPearson/nightscout-mcp/issues"
+Repository = "https://github.com/ColebyPearson/nightscout-mcp"
 
 [build-system]
 requires = ["hatchling"]
