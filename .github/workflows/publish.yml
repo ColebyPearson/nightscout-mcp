@@ -1,0 +1,73 @@
+name: Publish to PyPI
+
+# Fires when a tag matching v* is pushed (e.g. `git tag v0.2.0 && git push origin v0.2.0`).
+# Uses PyPI Trusted Publishing (OIDC) — no API token stored in repo secrets.
+#
+# REQUIRED ONE-TIME SETUP on the PyPI side before this can run:
+#   1. Create a PyPI account at https://pypi.org/account/register/ if you don't have one.
+#   2. Enable 2FA on the account.
+#   3. Visit https://pypi.org/manage/account/publishing/ and add a Pending Publisher:
+#         PyPI project name:  nightscout-mcp
+#         Owner:              ColebyPearson
+#         Repository name:    nightscout-mcp
+#         Workflow name:      publish.yml
+#         Environment name:   pypi
+#   4. In this GitHub repo: Settings → Environments → New environment → name `pypi`.
+#      (No secrets needed — Trusted Publishing uses OIDC.)
+#
+# After that, tagging v0.2.0 publishes 0.2.0 to PyPI.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    name: Build + publish
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/nightscout-mcp/
+    permissions:
+      id-token: write  # required for PyPI Trusted Publishing
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install Python
+        run: uv python install 3.12
+
+      - name: Verify tag matches pyproject version
+        # Refuse to publish if the git tag doesn't agree with the version
+        # declared in pyproject.toml — prevents accidentally publishing
+        # the wrong version with the wrong tag.
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PYPROJECT_VERSION=$(uv run python -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")
+          echo "Tag: $TAG_VERSION  Pyproject: $PYPROJECT_VERSION"
+          if [ "$TAG_VERSION" != "$PYPROJECT_VERSION" ]; then
+            echo "::error::Tag $TAG_VERSION does not match pyproject version $PYPROJECT_VERSION"
+            exit 1
+          fi
+
+      - name: Run tests one more time
+        run: |
+          uv sync --extra dev
+          uv run pytest -v
+
+      - name: Build wheel + sdist
+        run: uv build
+
+      - name: List built artifacts
+        run: ls -la dist/
+
+      - name: Publish to PyPI (Trusted Publishing)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # No password needed — gh-action-pypi-publish auto-discovers OIDC.
+          packages-dir: dist/

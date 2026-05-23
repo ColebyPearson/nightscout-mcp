@@ -4,7 +4,7 @@
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
-[![Tests: 75 passing](https://img.shields.io/badge/tests-75%20passing-brightgreen)](./tests)
+[![CI](https://github.com/ColebyPearson/nightscout-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/ColebyPearson/nightscout-mcp/actions/workflows/ci.yml)
 [![MCP](https://img.shields.io/badge/MCP-compatible-9cf)](https://modelcontextprotocol.io)
 
 ## ⚠️ Not a medical device
