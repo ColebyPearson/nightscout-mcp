@@ -30,6 +30,11 @@ class NightscoutClient:
             headers={"User-Agent": "nightscout-mcp/0.1.0 (+https://github.com)"},
         )
 
+    @property
+    def base_url(self) -> str:
+        """Exposed for tool responses — never includes the token."""
+        return self._settings.base_url
+
     async def aclose(self) -> None:
         await self._http.aclose()
 
