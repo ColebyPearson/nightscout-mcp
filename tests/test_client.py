@@ -12,9 +12,10 @@ from nightscout_mcp.config import Settings
 
 @pytest.fixture
 def settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
+    """Build deterministic test settings — ignore any real .env in cwd."""
     monkeypatch.setenv("NIGHTSCOUT_URL", "https://example.nightscout.test")
     monkeypatch.setenv("NIGHTSCOUT_TOKEN", "mcp-reader-abc12345")
-    return Settings()  # type: ignore[call-arg]
+    return Settings(_env_file=None)  # type: ignore[call-arg]
 
 
 @pytest.mark.asyncio
