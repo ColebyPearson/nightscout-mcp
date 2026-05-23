@@ -18,6 +18,7 @@ from ..client import NightscoutClient
 from ..models import (
     CurrentGlucose,
     DeviceStatusSummary,
+    GlucoseAtTime,
     GlucoseStats,
     IobCob,
     ProfileSummary,
@@ -28,6 +29,7 @@ from ..models import (
     parse_iso_to_utc,
 )
 from ..stats import DEFAULT_TIR_HIGH, DEFAULT_TIR_LOW, compute_stats
+from ..units import direction_to_arrow, mgdl_to_mmol
 
 # Be polite to free-tier hosted Nightscout instances.
 MAX_ENTRY_COUNT = 2000
@@ -389,3 +391,58 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
             or q in t.event_type.lower()
             or q in (t.entered_by or "").lower()
         ]
+
+    @mcp.tool()
+    async def glucose_at_time(time_iso: str) -> GlucoseAtTime:
+        """The CGM reading closest to a given timestamp.
+
+        Args:
+            time_iso: ISO8601 timestamp (e.g. "2026-05-22T03:00:00Z" — UTC
+                recommended). The returned reading may be slightly before or
+                after the requested time; `minutes_from_requested` is signed
+                (negative = before, positive = after) and `within_tolerance`
+                is True only if the closest reading is within ±15 min.
+        """
+        client = get_client()
+        target = parse_iso_to_utc(time_iso)
+        bracket_start = target - timedelta(minutes=15)
+        bracket_end = target + timedelta(minutes=15)
+        rows = await client.get(
+            "/api/v1/entries/sgv.json",
+            {
+                "count": 20,
+                "find[date][$gte]": int(bracket_start.timestamp() * 1000),
+                "find[date][$lt]": int(bracket_end.timestamp() * 1000),
+            },
+        )
+        sgvs = [Sgv.model_validate(r) for r in rows]
+
+        if not sgvs:
+            return GlucoseAtTime(
+                requested_iso=time_iso,
+                sgv_mgdl=None,
+                sgv_mmol=None,
+                direction=None,
+                trend_arrow=direction_to_arrow(None),
+                actual_iso=None,
+                minutes_from_requested=None,
+                within_tolerance=False,
+            )
+
+        # Pick the reading closest in absolute time distance.
+        def distance_minutes(s: Sgv) -> int:
+            return abs(int((parse_iso_to_utc(s.date_iso) - target).total_seconds() // 60))
+
+        closest = min(sgvs, key=distance_minutes)
+        actual_dt = parse_iso_to_utc(closest.date_iso)
+        signed_delta_min = int((actual_dt - target).total_seconds() // 60)
+        return GlucoseAtTime(
+            requested_iso=time_iso,
+            sgv_mgdl=closest.sgv_mgdl,
+            sgv_mmol=mgdl_to_mmol(closest.sgv_mgdl),
+            direction=closest.direction,
+            trend_arrow=closest.trend_arrow,
+            actual_iso=closest.date_iso,
+            minutes_from_requested=signed_delta_min,
+            within_tolerance=abs(signed_delta_min) <= 15,
+        )

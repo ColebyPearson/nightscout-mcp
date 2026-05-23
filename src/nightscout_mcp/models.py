@@ -262,6 +262,39 @@ class IsfDerivation(BaseModel):
     recommendation: str
 
 
+class GlucoseAtTime(BaseModel):
+    """The CGM reading closest to a queried timestamp."""
+
+    requested_iso: str
+    sgv_mgdl: int | None
+    sgv_mmol: float | None
+    direction: str | None
+    trend_arrow: str
+    actual_iso: str | None
+    minutes_from_requested: int | None  # signed: negative = before requested, positive = after
+    within_tolerance: bool  # True if closest reading is within +/- 15 min
+
+
+class CrDerivation(BaseModel):
+    """Real-world carb-ratio analysis derived from meal-bolus outcomes.
+
+    Two signals:
+      1. derived_cr_g_per_unit = average of (carbs / insulin) across meals,
+         i.e. the ratio the user actually applied. Compared to profile CR.
+      2. avg_end_minus_pre_mgdl = how meals tend to end relative to where
+         they started. Negative = consistently dropping (over-bolused);
+         positive = consistently rising (under-bolused); near zero = right.
+    """
+
+    sample_count: int
+    derived_cr_g_per_unit: float | None
+    profile_cr_g_per_unit: float | None
+    ratio_derived_over_profile: float | None
+    avg_end_minus_pre_mgdl: float | None  # post-meal residual signal
+    confidence: str  # "low" | "medium" | "high"
+    recommendation: str
+
+
 class SuspectedCompression(BaseModel):
     """One CGM dip that looks like a sensor-compression artifact."""
 
