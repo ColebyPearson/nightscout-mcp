@@ -16,6 +16,7 @@ import respx
 
 from nightscout_mcp.client import NightscoutClient
 from nightscout_mcp.config import Settings
+from nightscout_mcp.tools import analytics as analytics_tools
 from nightscout_mcp.tools import read as read_tools
 
 # The whole point: if this string ever leaks into a tool response, the
@@ -52,6 +53,7 @@ def registry_and_client(settings: Settings) -> tuple[_ToolRegistry, NightscoutCl
     client = NightscoutClient(settings)
     reg = _ToolRegistry()
     read_tools.register(reg, lambda: client)
+    analytics_tools.register(reg, lambda: client)
     return reg, client
 
 
@@ -99,7 +101,11 @@ SAMPLE_DEVICESTATUS = [
         "created_at": "2026-05-22T18:04:00.000Z",
         "openaps": {
             "iob": {"iob": 1.23},
-            "suggested": {"COB": 12.5, "reason": "Temp 0.8U/h for 30m"},
+            "suggested": {
+                "COB": 12.5,
+                "reason": "Temp 0.8U/h for 30m",
+                "sens": 2.8,  # effective ISF in mmol/L/U (profile is mmol)
+            },
         },
         "pump": {"battery": {"percent": 78}, "reservoir": 145.0},
         "uploader": {"battery": 84},
@@ -480,6 +486,7 @@ async def test_no_tool_response_contains_the_token(
             await reg.tools["get_server_status"](),
             await reg.tools["search_treatments"](query="bolus"),
             await reg.tools["glucose_at_time"](time_iso="2026-05-22T18:00:00Z"),
+            await reg.tools["effective_isf_check"](days=1),
             await reg.tools["health_check"](),
         ]
     finally:

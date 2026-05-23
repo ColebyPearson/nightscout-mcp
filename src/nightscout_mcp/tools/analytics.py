@@ -25,6 +25,9 @@ from ..analytics import (
     detect_patterns as _detect_patterns,
 )
 from ..analytics import (
+    effective_isf_check as _effective_isf_check,
+)
+from ..analytics import (
     insulin_sensitivity_check as _isf_check,
 )
 from ..analytics import (
@@ -36,6 +39,7 @@ from ..models import (
     CrDerivation,
     DailyReport,
     DetectedPatterns,
+    EffectiveIsfDerivation,
     IsfDerivation,
     MealAnalysis,
     OvernightAnalysis,
@@ -175,6 +179,85 @@ async def _fetch_treatments_between(
             break
         current_end = next_end
     return [Treatment.model_validate(r) for r in all_rows]
+
+
+async def _fetch_devicestatus_between(
+    client: NightscoutClient, start: datetime, end: datetime
+) -> list[dict[str, Any]]:
+    """Paginated devicestatus fetch in [start, end), returning raw dicts.
+
+    Devicestatus rows aren't modeled — analytics needs the full nested
+    openaps blob (suggested.sens, iob, etc.) which varies by loop. Returning
+    raw dicts keeps the consumer flexible.
+
+    Note: devicestatus is the highest-cardinality collection in Nightscout —
+    AAPS publishes one row per loop cycle (~5 min). 30 days ≈ 8600 rows. The
+    PAGINATION_TOTAL_CAP=20000 safety bound covers this comfortably.
+    """
+    all_rows: list[dict[str, Any]] = []
+    current_end = end
+    seen_ids: set[str] = set()
+    while True:
+        page = await client.get(
+            "/api/v1/devicestatus.json",
+            {
+                "count": MAX_ENTRY_COUNT_PER_PAGE,
+                "find[created_at][$gte]": _iso_z(start),
+                "find[created_at][$lt]": _iso_z(current_end),
+            },
+        )
+        if not page:
+            break
+        fresh = [r for r in page if (r.get("_id") or r.get("created_at")) not in seen_ids]
+        for r in fresh:
+            seen_ids.add(r.get("_id") or r.get("created_at"))
+        all_rows.extend(fresh)
+        if len(page) < MAX_ENTRY_COUNT_PER_PAGE:
+            break
+        if len(all_rows) >= PAGINATION_TOTAL_CAP:
+            break
+        oldest_iso = min(r.get("created_at", "") for r in page)
+        if not oldest_iso:
+            break
+        try:
+            next_end = parse_iso_to_utc(oldest_iso)
+        except Exception:
+            break
+        if next_end >= current_end:
+            break
+        current_end = next_end
+    return all_rows
+
+
+async def _extract_profile_settings(
+    client: NightscoutClient,
+) -> tuple[float | None, float | None, float, str]:
+    """Read the active profile's ISF (mmol/L/U), carb ratio (g/U), DIA (hours),
+    and units string ("mmol" or "mg/dL") from /api/v1/profile.json.
+
+    Used by insulin_sensitivity_check, carb_ratio_check, and effective_isf_check.
+    Falls back to (None, None, 5.0, "mmol") on any parsing failure.
+    """
+    profile_isf: float | None = None
+    profile_cr: float | None = None
+    dia: float = 5.0
+    units: str = "mmol"
+    try:
+        profile = await client.get("/api/v1/profile.json")
+        record = profile[0] if isinstance(profile, list) and profile else profile
+        sub = (record.get("store") or {}).get(record.get("defaultProfile", "Default"))
+        if sub:
+            isf_entries = sub.get("sens") or []
+            if isf_entries:
+                profile_isf = float(isf_entries[0].get("value", 0)) or None
+            cr_entries = sub.get("carbratio") or []
+            if cr_entries:
+                profile_cr = float(cr_entries[0].get("value", 0)) or None
+            dia = float(sub.get("dia", 5.0) or 5.0)
+            units = sub.get("units", "mmol")
+    except (AttributeError, KeyError, IndexError, TypeError):
+        pass
+    return profile_isf, profile_cr, dia, units
 
 
 def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
@@ -322,7 +405,11 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
     @mcp.tool()
     async def insulin_sensitivity_check(days: int = 14) -> IsfDerivation:
         """Derive your *real* insulin sensitivity from correction-bolus outcomes
-        and compare to your profile ISF.
+        and compare to your PROFILE ISF.
+
+        Use this when you want to validate your profile ISF against real
+        correction outcomes. For AAPS Dynamic ISF users, prefer
+        `effective_isf_check` — Dynamic ISF overrides profile ISF entirely.
 
         Args:
             days: lookback window. Default 14, max 30.
@@ -337,20 +424,7 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
         start = end - timedelta(days=days)
         sgvs = await _fetch_sgvs_between(client, start, end)
         txs = await _fetch_treatments_between(client, start, end)
-        # Profile ISF (in mmol/L per U)
-        profile = await client.get("/api/v1/profile.json")
-        profile_isf_mmol = None
-        dia = 5.0
-        try:
-            record = profile[0] if isinstance(profile, list) and profile else profile
-            sub = (record.get("store") or {}).get(record.get("defaultProfile", "Default"))
-            if sub:
-                isf_entries = sub.get("sens") or []
-                if isf_entries:
-                    profile_isf_mmol = float(isf_entries[0].get("value", 0)) or None
-                dia = float(sub.get("dia", 5.0) or 5.0)
-        except (AttributeError, KeyError, IndexError, TypeError):
-            pass
+        profile_isf_mmol, _, dia, _ = await _extract_profile_settings(client)
         return _isf_check(txs, sgvs, profile_isf_mmol, dia_hours=dia)
 
     @mcp.tool()
@@ -373,18 +447,33 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
         start = end - timedelta(days=days)
         sgvs = await _fetch_sgvs_between(client, start, end)
         txs = await _fetch_treatments_between(client, start, end)
-        profile = await client.get("/api/v1/profile.json")
-        profile_cr: float | None = None
-        try:
-            record = profile[0] if isinstance(profile, list) and profile else profile
-            sub = (record.get("store") or {}).get(record.get("defaultProfile", "Default"))
-            if sub:
-                cr_entries = sub.get("carbratio") or []
-                if cr_entries:
-                    profile_cr = float(cr_entries[0].get("value", 0)) or None
-        except (AttributeError, KeyError, IndexError, TypeError):
-            pass
+        _, profile_cr, _, _ = await _extract_profile_settings(client)
         return _carb_ratio_check(txs, sgvs, profile_cr)
+
+    @mcp.tool()
+    async def effective_isf_check(days: int = 14) -> EffectiveIsfDerivation:
+        """Compare AAPS's per-correction effective ISF (from devicestatus) to
+        realized BG drops, stratified by pre-bolus BG band.
+
+        Use this when you run AAPS Dynamic ISF and want to know whether AAPS's
+        per-correction effective ISF matches reality. For non-AAPS / flat-ISF
+        users, use `insulin_sensitivity_check` instead.
+
+        Args:
+            days: lookback window. Default 14, max 30.
+
+        Note: heavier than insulin_sensitivity_check — devicestatus carries
+        ~288 rows/day (~5 min cadence). 30-day windows fetch ~8600 rows.
+        """
+        client = get_client()
+        days = max(1, min(days, 30))
+        end = datetime.now(UTC)
+        start = end - timedelta(days=days)
+        sgvs = await _fetch_sgvs_between(client, start, end)
+        txs = await _fetch_treatments_between(client, start, end)
+        dss = await _fetch_devicestatus_between(client, start, end)
+        _, _, dia, units = await _extract_profile_settings(client)
+        return _effective_isf_check(txs, sgvs, dss, profile_units=units, dia_hours=dia)
 
     @mcp.tool()
     async def compression_low_analysis(days: int = 14) -> CompressionAnalysis:
