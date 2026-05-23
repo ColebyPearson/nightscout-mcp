@@ -456,6 +456,90 @@ class CompressionAnalysis(BaseModel):
     note: str
 
 
+# --- daily_synthesis: cross-tool clinical roll-up ---------------------------
+
+
+class Alert(BaseModel):
+    """A single time-sensitive finding from the combined data view."""
+
+    severity: str  # "critical" | "warning" | "info"
+    category: str  # e.g. "predicted_low" | "rescue_carbs_requested" | "severe_hypo_cluster"
+    summary: str  # one-line headline
+    detail: str  # short narrative (1-3 sentences)
+    source_tools: list[str]  # which underlying tools produced this signal
+
+
+class CrossToolInsight(BaseModel):
+    """A pattern visible only when combining outputs from multiple tools."""
+
+    headline: str  # one-line summary
+    detail: str  # full narrative with numbers
+    confidence: str  # "low" | "medium" | "high"
+    relevant_tools: list[str]
+    suggested_question: str | None = None  # question to take to a care team
+
+
+class DailySynthesis(BaseModel):
+    """Cross-tool clinical roll-up. Produced by daily_synthesis().
+
+    Combines snapshot + analytics + pattern detection into a single view,
+    with rule-based detection of cross-tool patterns the LLM (or user) would
+    otherwise miss when looking at any one tool in isolation.
+
+    Output is strictly *observational*. Recommendation text suggests questions
+    for a care team — never direct setting changes.
+    """
+
+    generated_at: str  # ISO timestamp
+    window_days: int
+
+    # Current snapshot
+    current_glucose_mgdl: int | None = None
+    current_glucose_mmol: float | None = None
+    current_trend_arrow: str | None = None
+    minutes_since_last_reading: int | None = None
+    iob_u: float | None = None
+    cob_g: float | None = None
+    aaps_predicted_eventual_bg_mgdl: int | None = None
+    aaps_predicted_eventual_bg_mmol: float | None = None
+    aaps_running_dynamic_isf: bool | None = None
+    aaps_effective_isf_mmol_per_u: float | None = None
+    aaps_target_bg_mgdl: int | None = None
+    aaps_target_bg_mmol: float | None = None
+
+    # Alerts (sorted by severity: critical > warning > info)
+    alerts: list[Alert]
+
+    # Trend summary
+    stats_window: GlucoseStats
+    yesterday_cv_percent: float | None = None
+    week_over_week_summary: str | None = None
+
+    # Pattern counts
+    recurring_overnight_lows: int
+    recurring_post_meal_spikes: int
+    recurring_dawn_phenomenon: int
+    suspected_compression_count: int
+
+    # The headline section — cross-tool insights
+    cross_tool_insights: list[CrossToolInsight]
+
+    # Suggested questions for care team
+    suggested_questions: list[str]
+
+    # Subordinate tool outputs (for LLM follow-up; the LLM can drill into specifics)
+    raw_isf_check: IsfDerivation | None = None
+    raw_effective_isf_check: EffectiveIsfDerivation | None = None
+    raw_carb_ratio_check: CrDerivation | None = None
+
+    # Safety footer (always present, advisory)
+    safety_disclaimer: str = (
+        "These signals are observational and advisory. They are NOT medical advice. "
+        "Do not change AAPS or insulin settings based on this output alone — "
+        "consult your endocrinologist, diabetes educator, or AAPS community first."
+    )
+
+
 class ServerStatus(BaseModel):
     """A subset of /api/v1/status.json that's actually useful."""
 
