@@ -7,12 +7,18 @@ injectable for tests and avoids circular imports.
 
 from __future__ import annotations
 
+import asyncio
+import atexit
+import logging
+
 from mcp.server.fastmcp import FastMCP
 
 from .client import NightscoutClient
 from .config import Settings, load_settings
 from .logging_setup import setup_logging
 from .tools import read as read_tools
+
+_log = logging.getLogger(__name__)
 
 # Module-level singletons. Loaded lazily so `import` doesn't require a valid
 # .env (helpful for tests and for `uv run mcp dev` introspection).
@@ -31,6 +37,26 @@ def _get_client() -> NightscoutClient:
 
 mcp = FastMCP("nightscout-mcp")
 read_tools.register(mcp, _get_client)
+
+
+def _cleanup_client() -> None:
+    """Best-effort httpx connection pool shutdown at process exit.
+
+    Runs in atexit context after the FastMCP event loop has stopped. We
+    create a fresh loop because the original one is gone. If anything
+    fails we swallow it — this is cosmetic cleanup, not correctness.
+    See issue #4.
+    """
+    global _client
+    if _client is None:
+        return
+    try:
+        asyncio.run(_client.aclose())
+    except Exception as exc:
+        _log.debug("client cleanup failed (non-fatal): %s", exc)
+
+
+atexit.register(_cleanup_client)
 
 
 def main() -> None:
