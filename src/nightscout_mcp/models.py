@@ -113,24 +113,125 @@ class ProfileSummary(BaseModel):
 # --- Device status / IOB / COB -----------------------------------------------
 
 
-class DeviceStatusSummary(BaseModel):
-    """One row from the devicestatus collection, flattened."""
+class AlgorithmState(BaseModel):
+    """Per-cycle AAPS/openaps algorithm state from devicestatus.openaps.suggested.
 
+    All glucose-valued and ISF-valued fields are surfaced in both mg/dL and
+    mmol/L (computed in model_post_init). AAPS internal arithmetic is always
+    mg/dL — the variable_sens and isfMgdlForCarbs fields are mg/dL/U regardless
+    of profile units.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    algorithm: str | None = None  # e.g. "SMB", "AMA"
+    running_dynamic_isf: bool | None = None
+    current_bg_mgdl: int | None = None  # what AAPS sees as current BG
+    current_bg_mmol: float | None = None
+    eventual_bg_mgdl: int | None = None  # predicted BG several hours out
+    eventual_bg_mmol: float | None = None
+    target_bg_mgdl: int | None = None  # current target
+    target_bg_mmol: float | None = None
+    bg_tick: str | None = None  # AAPS-format like "+3" or "-9" (delta from prior tick)
+    effective_isf_mgdl_per_u: float | None = None  # variable_sens, mg/dL/U
+    effective_isf_mmol_per_u: float | None = None
+    isf_for_carbs_mgdl_per_u: float | None = None  # isfMgdlForCarbs, mg/dL/U
+    isf_for_carbs_mmol_per_u: float | None = None
+    sensitivity_ratio: float | None = None  # AAPS Autosens multiplier, 1.0 = neutral
+    insulin_required_u: float | None = None  # AAPS-calculated correction need
+    carbs_required_g: float | None = None  # AAPS-calculated rescue carbs need
+    smb_units: float | None = None  # SMB proposed/delivered this cycle
+    reason: str | None = None  # full algorithm reason text (no truncation)
+
+    def model_post_init(self, _ctx: Any) -> None:
+        if self.current_bg_mgdl is not None:
+            self.current_bg_mmol = mgdl_to_mmol(self.current_bg_mgdl)
+        if self.eventual_bg_mgdl is not None:
+            self.eventual_bg_mmol = mgdl_to_mmol(self.eventual_bg_mgdl)
+        if self.target_bg_mgdl is not None:
+            self.target_bg_mmol = mgdl_to_mmol(self.target_bg_mgdl)
+        if self.effective_isf_mgdl_per_u is not None:
+            self.effective_isf_mmol_per_u = mgdl_to_mmol(self.effective_isf_mgdl_per_u)
+        if self.isf_for_carbs_mgdl_per_u is not None:
+            self.isf_for_carbs_mmol_per_u = mgdl_to_mmol(self.isf_for_carbs_mgdl_per_u)
+
+
+class BgPredictions(BaseModel):
+    """Summarized AAPS BG-prediction trajectories from openaps.suggested.predBGs.
+
+    Each trajectory is a list of predicted BG values at 5-min cadence. We drop
+    the array bodies (~30 values per trajectory × 4 trajectories = LLM noise)
+    and surface only the trajectory length and final-value endpoint per type.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    iob_minutes_ahead: int | None = None  # predBGs.IOB length × 5 min
+    iob_endpoint_mgdl: int | None = None  # last value of predBGs.IOB
+    iob_endpoint_mmol: float | None = None
+    cob_minutes_ahead: int | None = None
+    cob_endpoint_mgdl: int | None = None
+    cob_endpoint_mmol: float | None = None
+    uam_minutes_ahead: int | None = None  # Unannounced Meal trajectory
+    uam_endpoint_mgdl: int | None = None
+    uam_endpoint_mmol: float | None = None
+    zt_minutes_ahead: int | None = None  # Zero-Temp prediction
+    zt_endpoint_mgdl: int | None = None
+    zt_endpoint_mmol: float | None = None
+
+    def model_post_init(self, _ctx: Any) -> None:
+        for prefix in ("iob", "cob", "uam", "zt"):
+            mgdl = getattr(self, f"{prefix}_endpoint_mgdl")
+            if mgdl is not None:
+                setattr(self, f"{prefix}_endpoint_mmol", mgdl_to_mmol(mgdl))
+
+
+class DeviceStatusSummary(BaseModel):
+    """One row from the devicestatus collection, flattened.
+
+    AAPS publishes a deeply nested algorithm state per loop cycle (~5 min).
+    This model surfaces every clinically-useful field: pump basics, IOB/COB
+    (rich detail), pump.extended profile/version/temp-basal metadata, AAPS
+    per-cycle algorithm state including Dynamic ISF effective ISF, and
+    summarized BG prediction trajectories.
+    """
+
+    # Identity
     device: str | None = None
     created_at: str | None = None
-    # Pump fields (when present)
+    phone_charging: bool | None = None  # top-level isCharging
+    uploader_battery_percent: int | None = None
+
+    # Pump basics
     pump_battery_percent: int | None = None
     pump_reservoir_u: float | None = None
     pump_battery_voltage: float | None = None
-    # Loop / OpenAPS / AAPS fields (when present)
+
+    # IOB / COB (top-level for backwards compat with existing tools/tests)
     iob_u: float | None = None
     cob_g: float | None = None
+    basal_iob_u: float | None = None  # IOB attributable to basal vs bolus
+    insulin_activity: float | None = None  # rate of insulin action
+
+    # Loop enacted (existing fields preserved)
     loop_enacted_rate: float | None = None
     loop_enacted_duration_min: int | None = None
     loop_temp_basal_minutes_remaining: int | None = None
-    suggested_temp: str | None = None  # human-readable suggestion summary
-    # Uploader battery (phone)
-    uploader_battery_percent: int | None = None
+    suggested_temp: str | None = None  # truncated reason for back-compat
+
+    # Pump extended
+    active_profile: str | None = None
+    base_basal_rate_uph: float | None = None
+    last_bolus_at: str | None = None  # AAPS-format string, e.g. "5/22/26 11:41 PM"
+    last_bolus_units: float | None = None
+    temp_basal_absolute_rate_uph: float | None = None
+    temp_basal_started_at: str | None = None  # AAPS-format string
+    aaps_version: str | None = None  # e.g. "3.4.0.0-796d36ef0d-2026.01.04"
+    pump_status_text: str | None = None  # "Closed Loop" / "Open Loop" / "LGS" / ...
+
+    # Rich nested sub-views
+    algorithm: AlgorithmState | None = None
+    predictions: BgPredictions | None = None
 
 
 class IobCob(BaseModel):

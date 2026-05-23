@@ -16,6 +16,8 @@ from typing import Any
 
 from ..client import NightscoutClient
 from ..models import (
+    AlgorithmState,
+    BgPredictions,
     CurrentGlucose,
     DeviceStatusSummary,
     GlucoseAtTime,
@@ -55,56 +57,204 @@ def _unix_ms(dt: datetime) -> int:
     return int(dt.timestamp() * 1000)
 
 
+def _safe_dict(obj: Any) -> dict[str, Any]:
+    """Return obj if it's a dict, else an empty dict — for defensive nested reads."""
+    return obj if isinstance(obj, dict) else {}
+
+
+def _algorithm_state(suggested: dict[str, Any]) -> AlgorithmState | None:
+    """Build an AlgorithmState from openaps.suggested (or openaps.enacted as
+    a fallback). Returns None if no recognizable algorithm fields present.
+    """
+    if not suggested:
+        return None
+    # If NONE of the algorithm fields are present, skip the sub-model entirely
+    keys_of_interest = (
+        "algorithm",
+        "runningDynamicIsf",
+        "bg",
+        "eventualBG",
+        "targetBG",
+        "tick",
+        "variable_sens",
+        "isfMgdlForCarbs",
+        "sensitivityRatio",
+        "insulinReq",
+        "carbsReq",
+        "units",
+        "reason",
+    )
+    if not any(k in suggested for k in keys_of_interest):
+        return None
+    return AlgorithmState(
+        algorithm=suggested.get("algorithm") if isinstance(suggested.get("algorithm"), str) else None,
+        running_dynamic_isf=suggested.get("runningDynamicIsf")
+        if isinstance(suggested.get("runningDynamicIsf"), bool)
+        else None,
+        current_bg_mgdl=int(suggested["bg"]) if isinstance(suggested.get("bg"), (int, float)) else None,
+        eventual_bg_mgdl=int(suggested["eventualBG"])
+        if isinstance(suggested.get("eventualBG"), (int, float))
+        else None,
+        target_bg_mgdl=int(suggested["targetBG"])
+        if isinstance(suggested.get("targetBG"), (int, float))
+        else None,
+        bg_tick=suggested.get("tick") if isinstance(suggested.get("tick"), str) else None,
+        effective_isf_mgdl_per_u=float(suggested["variable_sens"])
+        if isinstance(suggested.get("variable_sens"), (int, float))
+        else None,
+        isf_for_carbs_mgdl_per_u=float(suggested["isfMgdlForCarbs"])
+        if isinstance(suggested.get("isfMgdlForCarbs"), (int, float))
+        else None,
+        sensitivity_ratio=float(suggested["sensitivityRatio"])
+        if isinstance(suggested.get("sensitivityRatio"), (int, float))
+        else None,
+        insulin_required_u=float(suggested["insulinReq"])
+        if isinstance(suggested.get("insulinReq"), (int, float))
+        else None,
+        carbs_required_g=float(suggested["carbsReq"])
+        if isinstance(suggested.get("carbsReq"), (int, float))
+        else None,
+        smb_units=float(suggested["units"])
+        if isinstance(suggested.get("units"), (int, float))
+        else None,
+        reason=str(suggested["reason"]) if isinstance(suggested.get("reason"), str) else None,
+    )
+
+
+def _bg_predictions(suggested: dict[str, Any]) -> BgPredictions | None:
+    """Summarize openaps.suggested.predBGs.{IOB,COB,UAM,ZT} to (length, endpoint)
+    pairs. Returns None if no predBGs sub-arrays present.
+    """
+    pred = _safe_dict(suggested.get("predBGs"))
+    if not pred:
+        return None
+    kwargs: dict[str, Any] = {}
+    for prefix, key in (("iob", "IOB"), ("cob", "COB"), ("uam", "UAM"), ("zt", "ZT")):
+        arr = pred.get(key)
+        if isinstance(arr, list) and arr:
+            # Cadence is 5 min per element in oref0/AAPS conventions
+            kwargs[f"{prefix}_minutes_ahead"] = len(arr) * 5
+            last = arr[-1]
+            if isinstance(last, (int, float)):
+                kwargs[f"{prefix}_endpoint_mgdl"] = int(last)
+    if not kwargs:
+        return None
+    return BgPredictions(**kwargs)
+
+
 def _flatten_device_status(row: dict[str, Any]) -> DeviceStatusSummary:
-    """Pull the LLM-relevant fields out of a (deeply nested) devicestatus row."""
-    pump = row.get("pump", {}) or {}
-    openaps = row.get("openaps", {}) or {}
-    loop = row.get("loop", {}) or {}
-    uploader = row.get("uploader", {}) or {}
+    """Pull the LLM-relevant fields out of a (deeply nested) devicestatus row.
 
-    # IOB/COB can live in any of these — try richest source first.
+    Reads from `openaps.suggested` for algorithm state (the *decision* state),
+    falling back to `openaps.enacted` when suggested is absent. Pump-extended
+    metadata (active profile, AAPS version, temp basal info) comes from
+    `pump.extended.*`. Phone state from top-level `isCharging` and
+    `uploaderBattery`.
+    """
+    pump = _safe_dict(row.get("pump"))
+    openaps = _safe_dict(row.get("openaps"))
+    loop = _safe_dict(row.get("loop"))
+    uploader = _safe_dict(row.get("uploader"))
+    pump_battery = _safe_dict(pump.get("battery"))
+    pump_extended = _safe_dict(pump.get("extended"))
+    pump_status = _safe_dict(pump.get("status"))
+
+    # IOB / IOB-detail. Top-level iob_u stays simple for backwards compat;
+    # basal_iob and activity come from openaps.iob if present.
     iob_u: float | None = None
-    cob_g: float | None = None
-    for src in (openaps.get("iob"), loop.get("iob"), pump.get("iob")):
-        if isinstance(src, dict) and "iob" in src:
-            iob_u = src.get("iob")
-            break
-        elif isinstance(src, (int, float)):
-            iob_u = float(src)
-            break
-    cob_src = openaps.get("suggested", {}) if isinstance(openaps.get("suggested"), dict) else {}
-    if "COB" in cob_src:
-        cob_g = cob_src.get("COB")
-    elif isinstance(loop.get("cob"), dict):
-        cob_g = loop["cob"].get("cob")
+    basal_iob_u: float | None = None
+    insulin_activity: float | None = None
+    iob_blob = openaps.get("iob") or loop.get("iob") or pump.get("iob")
+    if isinstance(iob_blob, dict):
+        if isinstance(iob_blob.get("iob"), (int, float)):
+            iob_u = float(iob_blob["iob"])
+        if isinstance(iob_blob.get("basaliob"), (int, float)):
+            basal_iob_u = float(iob_blob["basaliob"])
+        if isinstance(iob_blob.get("activity"), (int, float)):
+            insulin_activity = float(iob_blob["activity"])
+    elif isinstance(iob_blob, (int, float)):
+        iob_u = float(iob_blob)
 
-    enacted = openaps.get("enacted") or loop.get("enacted") or {}
-    suggested = openaps.get("suggested") or loop.get("recommended") or {}
-    suggested_str: str | None = None
-    if isinstance(suggested, dict) and suggested.get("reason"):
-        suggested_str = str(suggested["reason"])[:200]
+    # COB
+    cob_g: float | None = None
+    suggested = _safe_dict(openaps.get("suggested")) or _safe_dict(loop.get("recommended"))
+    enacted = _safe_dict(openaps.get("enacted")) or _safe_dict(loop.get("enacted"))
+    if isinstance(suggested.get("COB"), (int, float)):
+        cob_g = float(suggested["COB"])
+    elif isinstance(loop.get("cob"), dict) and isinstance(loop["cob"].get("cob"), (int, float)):
+        cob_g = float(loop["cob"]["cob"])
+
+    # Algorithm state — prefer suggested, fall back to enacted
+    algorithm = _algorithm_state(suggested) or _algorithm_state(enacted)
+    predictions = _bg_predictions(suggested) or _bg_predictions(enacted)
+
+    # Backwards-compat truncated reason
+    reason_full = suggested.get("reason") if isinstance(suggested.get("reason"), str) else None
+    suggested_str = reason_full[:200] if reason_full else None
+
+    # Uploader battery — bug fix: real field is top-level `uploaderBattery`,
+    # `uploader.battery` is a legacy/empty path. Try the canonical location
+    # first, fall back for older Nightscout/AAPS data.
+    uploader_battery: int | None = None
+    if isinstance(row.get("uploaderBattery"), (int, float)):
+        uploader_battery = int(row["uploaderBattery"])
+    elif isinstance(uploader.get("battery"), (int, float)):
+        uploader_battery = int(uploader["battery"])
 
     return DeviceStatusSummary(
         device=row.get("device"),
         created_at=row.get("created_at"),
-        pump_battery_percent=(pump.get("battery") or {}).get("percent")
-        if isinstance(pump.get("battery"), dict)
+        phone_charging=row.get("isCharging") if isinstance(row.get("isCharging"), bool) else None,
+        uploader_battery_percent=uploader_battery,
+        pump_battery_percent=pump_battery.get("percent")
+        if isinstance(pump_battery.get("percent"), (int, float))
         else None,
-        pump_battery_voltage=(pump.get("battery") or {}).get("voltage")
-        if isinstance(pump.get("battery"), dict)
+        pump_battery_voltage=pump_battery.get("voltage")
+        if isinstance(pump_battery.get("voltage"), (int, float))
         else None,
-        pump_reservoir_u=round(pump.get("reservoir"), 1)
+        pump_reservoir_u=round(float(pump.get("reservoir")), 1)
         if isinstance(pump.get("reservoir"), (int, float))
         else None,
         iob_u=round(iob_u, 2) if iob_u is not None else None,
         cob_g=round(cob_g, 1) if cob_g is not None else None,
-        loop_enacted_rate=enacted.get("rate") if isinstance(enacted, dict) else None,
-        loop_enacted_duration_min=enacted.get("duration") if isinstance(enacted, dict) else None,
+        basal_iob_u=round(basal_iob_u, 3) if basal_iob_u is not None else None,
+        insulin_activity=round(insulin_activity, 4) if insulin_activity is not None else None,
+        loop_enacted_rate=enacted.get("rate") if isinstance(enacted.get("rate"), (int, float)) else None,
+        loop_enacted_duration_min=enacted.get("duration")
+        if isinstance(enacted.get("duration"), (int, float))
+        else None,
         loop_temp_basal_minutes_remaining=enacted.get("minutesRemaining")
-        if isinstance(enacted, dict)
+        if isinstance(enacted.get("minutesRemaining"), (int, float))
         else None,
         suggested_temp=suggested_str,
-        uploader_battery_percent=uploader.get("battery") if isinstance(uploader, dict) else None,
+        # Pump-extended metadata
+        active_profile=pump_extended.get("ActiveProfile")
+        if isinstance(pump_extended.get("ActiveProfile"), str)
+        else None,
+        base_basal_rate_uph=float(pump_extended["BaseBasalRate"])
+        if isinstance(pump_extended.get("BaseBasalRate"), (int, float))
+        else None,
+        last_bolus_at=pump_extended.get("LastBolus")
+        if isinstance(pump_extended.get("LastBolus"), str)
+        else None,
+        last_bolus_units=float(pump_extended["LastBolusAmount"])
+        if isinstance(pump_extended.get("LastBolusAmount"), (int, float))
+        else None,
+        temp_basal_absolute_rate_uph=float(pump_extended["TempBasalAbsoluteRate"])
+        if isinstance(pump_extended.get("TempBasalAbsoluteRate"), (int, float))
+        else None,
+        temp_basal_started_at=pump_extended.get("TempBasalStart")
+        if isinstance(pump_extended.get("TempBasalStart"), str)
+        else None,
+        aaps_version=pump_extended.get("Version")
+        if isinstance(pump_extended.get("Version"), str)
+        else None,
+        pump_status_text=pump_status.get("status")
+        if isinstance(pump_status.get("status"), str)
+        else None,
+        # Rich nested sub-views
+        algorithm=algorithm,
+        predictions=predictions,
     )
 
 
@@ -327,9 +477,22 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
             return flat
 
         def has_loop(ds: DeviceStatusSummary) -> bool:
+            # IOB/COB/enacted/suggested are the original signals; algorithm state
+            # (effective ISF, target, etc.) is the strongest indicator that this
+            # row carries real per-cycle AAPS decision-making data.
             return any(
                 v is not None
                 for v in (ds.iob_u, ds.cob_g, ds.loop_enacted_rate, ds.suggested_temp)
+            ) or (
+                ds.algorithm is not None
+                and any(
+                    v is not None
+                    for v in (
+                        ds.algorithm.effective_isf_mgdl_per_u,
+                        ds.algorithm.target_bg_mgdl,
+                        ds.algorithm.algorithm,
+                    )
+                )
             )
 
         def has_pump(ds: DeviceStatusSummary) -> bool:
