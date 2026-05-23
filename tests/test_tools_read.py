@@ -413,6 +413,48 @@ async def test_search_treatments_filters_by_substring(
     assert results[0].id == "t2"
 
 
+@pytest.mark.asyncio
+@respx.mock
+async def test_glucose_at_time_returns_closest_reading(
+    registry_and_client: tuple[_ToolRegistry, NightscoutClient],
+) -> None:
+    reg, client = registry_and_client
+    # Three readings; the 3am one is closest to the requested 03:01.
+    payload = [
+        _sgv_row(120, "2026-05-22T03:05:00.000Z"),
+        _sgv_row(118, "2026-05-22T03:00:00.000Z"),
+        _sgv_row(122, "2026-05-22T02:55:00.000Z"),
+    ]
+    respx.get(url__startswith="https://test.nightscout.example/api/v1/entries/sgv.json").mock(
+        return_value=httpx.Response(200, json=payload)
+    )
+    try:
+        result = await reg.tools["glucose_at_time"](time_iso="2026-05-22T03:01:00Z")
+    finally:
+        await client.aclose()
+    assert result.sgv_mgdl == 118  # the 03:00 reading is closest (1 min before)
+    assert result.minutes_from_requested == -1
+    assert result.within_tolerance is True
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_glucose_at_time_handles_no_readings_in_window(
+    registry_and_client: tuple[_ToolRegistry, NightscoutClient],
+) -> None:
+    reg, client = registry_and_client
+    respx.get(url__startswith="https://test.nightscout.example/api/v1/entries/sgv.json").mock(
+        return_value=httpx.Response(200, json=[])
+    )
+    try:
+        result = await reg.tools["glucose_at_time"](time_iso="2026-05-22T03:00:00Z")
+    finally:
+        await client.aclose()
+    assert result.sgv_mgdl is None
+    assert result.within_tolerance is False
+    assert result.minutes_from_requested is None
+
+
 # --- The critical safety property --------------------------------------------
 
 
@@ -437,6 +479,7 @@ async def test_no_tool_response_contains_the_token(
             await reg.tools["get_device_status"](latest=True),
             await reg.tools["get_server_status"](),
             await reg.tools["search_treatments"](query="bolus"),
+            await reg.tools["glucose_at_time"](time_iso="2026-05-22T18:00:00Z"),
             await reg.tools["health_check"](),
         ]
     finally:

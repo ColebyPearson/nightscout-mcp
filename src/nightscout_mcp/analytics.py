@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 
 from .models import (
     CompressionAnalysis,
+    CrDerivation,
     DailyReport,
     DetectedPatterns,
     IsfDerivation,
@@ -465,6 +466,196 @@ def insulin_sensitivity_check(
         ratio_derived_over_profile=round(ratio, 2) if ratio is not None else None,
         confidence=confidence,
         recommendation=recommendation,
+    )
+
+
+def _pair_carbs_with_insulin(
+    treatments: list[Treatment], window_minutes: int = 10
+) -> list[tuple[datetime, float, float]]:
+    """Pair carb treatments with nearby insulin treatments.
+
+    AAPS and similar uploaders write carbs and insulin as separate rows.
+    For each carb-bearing row (>5g), look for any insulin row (>0U) within
+    ±`window_minutes`. If a single carb row pairs with multiple insulin rows,
+    we sum the insulin (handles bolus + extended bolus combos).
+
+    Returns: list of (carb_time, carbs_g, total_insulin_u) tuples.
+    """
+    pairs: list[tuple[datetime, float, float]] = []
+    window = timedelta(minutes=window_minutes)
+    for carb_tx in treatments:
+        if not carb_tx.carbs or carb_tx.carbs <= 5:
+            continue
+        try:
+            carb_time = parse_iso_to_utc(carb_tx.created_at)
+        except Exception:
+            continue
+        total_insulin = 0.0
+        # If the carb row itself also has insulin (tight-pump style), use it.
+        if carb_tx.insulin and carb_tx.insulin > 0:
+            total_insulin += carb_tx.insulin
+        # Plus any insulin-bearing rows within ±window minutes
+        for other in treatments:
+            if other.created_at == carb_tx.created_at:
+                continue
+            if not other.insulin or other.insulin <= 0:
+                continue
+            try:
+                other_time = parse_iso_to_utc(other.created_at)
+            except Exception:
+                continue
+            if abs((other_time - carb_time).total_seconds()) <= window.total_seconds():
+                total_insulin += other.insulin
+        if total_insulin > 0:
+            pairs.append((carb_time, carb_tx.carbs, total_insulin))
+    return pairs
+
+
+def carb_ratio_check(
+    treatments: list[Treatment],
+    sgvs: list[Sgv],
+    profile_cr_g_per_unit: float | None,
+) -> CrDerivation:
+    """Derive a real-world carb-ratio signal from meal-bolus outcomes.
+
+    Two findings combined:
+      - The CR the user *actually applied* (carbs ÷ insulin), averaged across
+        eligible meals. Compared to the profile CR.
+      - The post-meal residual: avg of (BG 4h after meal − BG at meal).
+        Negative = meals end below where they started (over-bolused).
+        Positive = meals end higher (under-bolused).
+
+    A meal is eligible when: carbs > 5 g AND insulin > 0 AND there's a
+    pre-meal CGM reading AND a CGM reading ~4 h later. Meals followed by
+    another meal within 4 h are excluded (contamination).
+    """
+    sgv_sorted = sorted(sgvs, key=lambda r: parse_iso_to_utc(r.date_iso))
+    paired = _pair_carbs_with_insulin(treatments)
+    ratios: list[float] = []
+    residuals: list[float] = []
+
+    # Pre-collect carb-bearing meal timestamps for forward-contamination check
+    other_carb_times = [
+        parse_iso_to_utc(t.created_at)
+        for t in treatments
+        if t.carbs and t.carbs > 5
+    ]
+
+    for tx_time, carbs_g, insulin_u in paired:
+        end_window = tx_time + timedelta(hours=4)
+        # Forward-only contamination: exclude if another carb meal lands during
+        # the residual-measurement window. Prior meals are mostly absorbed by
+        # tx_time; we don't penalize for them. Symmetric exclusion was
+        # empirically too strict for typical 3-4 meals/day users.
+        contaminated = any(
+            tx_time < other_time <= end_window
+            for other_time in other_carb_times
+            if other_time != tx_time
+        )
+        if contaminated:
+            continue
+
+        pre_sgv: Sgv | None = None
+        end_sgv: Sgv | None = None
+        for s in sgv_sorted:
+            ts = parse_iso_to_utc(s.date_iso)
+            if ts <= tx_time:
+                pre_sgv = s
+            elif ts <= end_window:
+                end_sgv = s  # last one in window
+
+        if not pre_sgv or not end_sgv:
+            continue
+
+        ratios.append(carbs_g / insulin_u)
+        residuals.append(end_sgv.sgv_mgdl - pre_sgv.sgv_mgdl)
+
+    if not ratios:
+        return CrDerivation(
+            sample_count=0,
+            derived_cr_g_per_unit=None,
+            profile_cr_g_per_unit=profile_cr_g_per_unit,
+            ratio_derived_over_profile=None,
+            avg_end_minus_pre_mgdl=None,
+            confidence="low",
+            recommendation=(
+                "Not enough eligible meal boluses. A meal needs carbs >5g, insulin >0, "
+                "pre-meal CGM reading, and a CGM reading ~4h later with no other meal "
+                "in between."
+            ),
+        )
+
+    derived_cr = statistics.fmean(ratios)
+    avg_residual = statistics.fmean(residuals)
+    ratio = (derived_cr / profile_cr_g_per_unit) if profile_cr_g_per_unit else None
+
+    if len(ratios) < 3:
+        confidence = "low"
+    elif len(ratios) < 8:
+        confidence = "medium"
+    else:
+        confidence = "high"
+
+    # Compose recommendation from BOTH signals. When they agree the direction
+    # is clear; when they disagree, surface that the user's BG is being
+    # affected by something other than the meal bolus (basal, loop corrections,
+    # exercise, missed carb logging) and decline to recommend a CR change.
+    parts: list[str] = []
+    parts.append(
+        f"Average applied CR: {derived_cr:.0f} g/U"
+        + (f" (profile: {profile_cr_g_per_unit:.0f} g/U)" if profile_cr_g_per_unit else "")
+        + "."
+    )
+    parts.append(
+        f"Average post-meal residual: {avg_residual:+.0f} mg/dL "
+        f"({'meals tend to end higher' if avg_residual > 0 else 'meals tend to end lower'} than they started)."
+    )
+
+    # Direction-of-CR-adjustment logic
+    cr_signal = 0  # -1 = CR too low, +1 = CR too high, 0 = neutral
+    res_signal = 0
+    if ratio is not None:
+        if ratio > 1.10:
+            cr_signal = +1  # applying MORE g/U than profile → fewer units per gram than profile thinks
+        elif ratio < 0.90:
+            cr_signal = -1
+    if avg_residual >= 20:
+        res_signal = +1  # ends high → CR too high (under-bolused)
+    elif avg_residual <= -20:
+        res_signal = -1  # ends low → CR too low (over-bolused)
+
+    if ratio is None:
+        parts.append("No profile CR available to compare against.")
+    elif cr_signal == 0 and res_signal == 0:
+        parts.append("Both signals are stable — CR looks well-tuned.")
+    elif cr_signal == res_signal and cr_signal == +1:
+        parts.append("Both signals suggest CR is too high (too few units per gram). Consider lowering CR.")
+    elif cr_signal == res_signal and cr_signal == -1:
+        parts.append("Both signals suggest CR is too low (too many units per gram). Consider raising CR.")
+    elif cr_signal != 0 and res_signal != 0 and cr_signal != res_signal:
+        parts.append(
+            "Signals disagree: applied CR and post-meal residual point in opposite directions. "
+            "BG is likely being moved by factors outside the meal bolus — basal rate, AAPS/Loop "
+            "auto-corrections, exercise, or unlogged carbs. CR adjustment isn't indicated from "
+            "this data alone."
+        )
+    else:
+        # One signal is neutral, the other points somewhere
+        active = "applied CR" if cr_signal else "post-meal residual"
+        direction = "high" if (cr_signal or res_signal) > 0 else "low"
+        parts.append(
+            f"Only the {active} signal is notable (suggests CR may be too {direction}). "
+            "Insufficient agreement to recommend a change."
+        )
+
+    return CrDerivation(
+        sample_count=len(ratios),
+        derived_cr_g_per_unit=round(derived_cr, 1),
+        profile_cr_g_per_unit=profile_cr_g_per_unit,
+        ratio_derived_over_profile=round(ratio, 2) if ratio is not None else None,
+        avg_end_minus_pre_mgdl=round(avg_residual, 1),
+        confidence=confidence,
+        recommendation=" ".join(parts),
     )
 
 
