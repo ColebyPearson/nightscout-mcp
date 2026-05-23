@@ -262,6 +262,46 @@ class IsfDerivation(BaseModel):
     recommendation: str
 
 
+class IsfBandSample(BaseModel):
+    """Per-BG-band breakdown for effective_isf_check.
+
+    Boundaries are half-open: a sample with pre-bolus BG exactly at `band_upper`
+    falls into the NEXT band, not this one. `band_upper` is None for the
+    open-ended top band.
+    """
+
+    band_label: str  # "below_target" | "in_target" | "above_target"
+    band_lower_mgdl: int
+    band_upper_mgdl: int | None  # None = open upper bound
+    sample_count: int
+    avg_effective_isf_mmol_per_unit: float | None
+    avg_realized_isf_mmol_per_unit: float | None
+    ratio_realized_over_effective: float | None
+    note: str | None = None  # populated when sample_count < 3 (insufficient signal)
+
+
+class EffectiveIsfDerivation(BaseModel):
+    """Real-world ISF analysis vs AAPS's per-correction effective ISF.
+
+    For AAPS Dynamic ISF users, this is the right comparison (vs. the
+    profile-ISF comparison in IsfDerivation): we read what AAPS *actually
+    used* at each correction moment from devicestatus.openaps.suggested.sens
+    and compare it to the realized BG drop. Stratified by pre-bolus BG band
+    so users can see whether the Dynamic ISF formula's BG curve is
+    mis-calibrated independently from the global Adjustment Factor.
+    """
+
+    sample_count: int  # eligible corrections with a matched sens value
+    devicestatus_rows_examined: int  # total dev-status rows fetched in the window
+    samples_without_sens: int  # corrections lacking a sens match within tolerance
+    avg_effective_isf_mmol_per_unit: float | None  # what AAPS used, averaged
+    avg_realized_isf_mmol_per_unit: float | None  # what actually happened, averaged
+    overall_ratio_realized_over_effective: float | None  # >1 = AAPS over-doses
+    confidence: str  # "low" | "medium" | "high"
+    by_bg_band: list[IsfBandSample]
+    recommendation: str
+
+
 class GlucoseAtTime(BaseModel):
     """The CGM reading closest to a queried timestamp."""
 

@@ -15,6 +15,7 @@ from nightscout_mcp.analytics import (
     compression_low_analysis,
     daily_report,
     detect_patterns,
+    effective_isf_check,
     insulin_sensitivity_check,
     overnight_analysis,
 )
@@ -50,6 +51,28 @@ def _tx(
             "notes": notes,
         }
     )
+
+
+def _ds(
+    dt: datetime,
+    sens: float | None = None,
+    cob: float | None = None,
+    variable_sens: float | None = None,
+) -> dict:
+    """Minimal devicestatus row. Supports both `sens` (oref0/Loop convention)
+    and `variable_sens` (AAPS Dynamic ISF convention — always mg/dL/U).
+    """
+    suggested: dict = {}
+    if sens is not None:
+        suggested["sens"] = sens
+    if variable_sens is not None:
+        suggested["variable_sens"] = variable_sens
+    if cob is not None:
+        suggested["COB"] = cob
+    return {
+        "created_at": dt.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+        "openaps": {"suggested": suggested},
+    }
 
 
 # --- daily_report -------------------------------------------------------------
@@ -381,3 +404,216 @@ def test_carb_ratio_check_flags_systematic_post_meal_rise() -> None:
     assert r.sample_count == 5
     assert r.avg_end_minus_pre_mgdl == 40.0
     assert "may be too high" in r.recommendation.lower()  # CR too high → undercovered
+
+
+# --- effective_isf_check -----------------------------------------------------
+
+
+def _correction_with_drop(
+    base: datetime,
+    pre_mgdl: int,
+    min_mgdl: int,
+    units: float,
+    sens_at_decision: float | None = None,
+) -> tuple[list[Sgv], list[Treatment], list[dict]]:
+    """Build a single correction-bolus scenario: pre SGV, bolus, post-min SGV,
+    and (optionally) a devicestatus row 5 min before the bolus carrying sens.
+    """
+    sgvs = [
+        _sgv(pre_mgdl, base - timedelta(minutes=10)),
+        _sgv(min_mgdl, base + timedelta(hours=3)),
+        _sgv(min_mgdl + 5, base + timedelta(hours=4)),
+    ]
+    txs = [_tx("Correction Bolus", base, insulin=units)]
+    devicestatuses: list[dict] = []
+    if sens_at_decision is not None:
+        devicestatuses.append(_ds(base - timedelta(minutes=5), sens=sens_at_decision))
+    return sgvs, txs, devicestatuses
+
+
+def test_effective_isf_check_happy_path_in_target_band() -> None:
+    """Four corrections all starting in [100,180), AAPS effective ISF matches realized."""
+    base = datetime(2026, 5, 22, 12, 0, tzinfo=UTC)
+    sgvs: list[Sgv] = []
+    txs: list[Treatment] = []
+    dss: list[dict] = []
+    for i in range(4):
+        t = base + timedelta(hours=6 * i)
+        s, tx, ds = _correction_with_drop(
+            t, pre_mgdl=140, min_mgdl=90, units=1.0, sens_at_decision=2.8
+        )
+        sgvs += s
+        txs += tx
+        dss += ds
+    # realized = (140-90)/1 = 50 mg/dL/U = 2.8 mmol/L/U; effective = 2.8 → ratio 1.0
+    r = effective_isf_check(txs, sgvs, dss, profile_units="mmol")
+    assert r.sample_count == 4
+    assert r.samples_without_sens == 0
+    assert r.overall_ratio_realized_over_effective == 1.0
+    in_band = next(b for b in r.by_bg_band if b.band_label == "in_target")
+    assert in_band.sample_count == 4
+    assert "well-calibrated" in r.recommendation
+
+
+def test_effective_isf_check_stratifies_by_bg_band() -> None:
+    """3 in-target ratio 1.0; 3 above-target ratio 1.3 → bands distinct."""
+    base = datetime(2026, 5, 22, 8, 0, tzinfo=UTC)
+    sgvs: list[Sgv] = []
+    txs: list[Treatment] = []
+    dss: list[dict] = []
+    # in_target band: pre=140, drop 50 → realized 2.8 mmol/U; sens=2.8 → ratio 1.0
+    for i in range(3):
+        t = base + timedelta(hours=8 * i)
+        s, tx, ds = _correction_with_drop(t, 140, 90, 1.0, sens_at_decision=2.8)
+        sgvs += s
+        txs += tx
+        dss += ds
+    # above_target band: pre=220, drop ~65 → realized ~3.6 mmol/U; sens=2.8 → ratio ~1.3
+    for i in range(3):
+        t = base + timedelta(days=2, hours=8 * i)
+        s, tx, ds = _correction_with_drop(t, 220, 155, 1.0, sens_at_decision=2.8)
+        sgvs += s
+        txs += tx
+        dss += ds
+    r = effective_isf_check(txs, sgvs, dss, profile_units="mmol")
+    assert r.sample_count == 6
+    by = {b.band_label: b for b in r.by_bg_band}
+    assert by["in_target"].sample_count == 3
+    assert by["above_target"].sample_count == 3
+    # in_target ratio ≈ 1.0; above_target ratio > 1.15
+    assert by["in_target"].ratio_realized_over_effective == 1.0
+    assert by["above_target"].ratio_realized_over_effective > 1.15
+    assert "BG-curve" in r.recommendation
+
+
+def test_effective_isf_check_excludes_samples_missing_sens() -> None:
+    """5 corrections; 2 have no devicestatus within ±15 min → samples_without_sens=2."""
+    base = datetime(2026, 5, 22, 12, 0, tzinfo=UTC)
+    sgvs: list[Sgv] = []
+    txs: list[Treatment] = []
+    dss: list[dict] = []
+    for i in range(5):
+        t = base + timedelta(hours=8 * i)
+        s, tx, _ = _correction_with_drop(t, 140, 90, 1.0)
+        sgvs += s
+        txs += tx
+        if i < 3:
+            dss.append(_ds(t - timedelta(minutes=5), sens=2.8))
+        # 2 corrections have NO matching devicestatus
+    r = effective_isf_check(txs, sgvs, dss, profile_units="mmol")
+    assert r.sample_count == 3
+    assert r.samples_without_sens == 2
+
+
+def test_effective_isf_check_handles_zero_sens_field() -> None:
+    """Devicestatus rows present but none carry sens → diagnostic recommendation."""
+    base = datetime(2026, 5, 22, 12, 0, tzinfo=UTC)
+    sgvs, txs, _ = _correction_with_drop(base, 140, 90, 1.0)
+    # Row exists but no sens
+    dss = [_ds(base - timedelta(minutes=5), cob=15)]
+    r = effective_isf_check(txs, sgvs, dss, profile_units="mmol")
+    assert r.sample_count == 0
+    assert r.devicestatus_rows_examined == 1
+    assert "Dynamic ISF may be disabled" in r.recommendation
+
+
+def test_effective_isf_check_handles_zero_devicestatus_rows() -> None:
+    """No devicestatus rows at all → distinct prerequisite message."""
+    base = datetime(2026, 5, 22, 12, 0, tzinfo=UTC)
+    sgvs, txs, _ = _correction_with_drop(base, 140, 90, 1.0)
+    r = effective_isf_check(txs, sgvs, devicestatuses=[], profile_units="mmol")
+    assert r.sample_count == 0
+    assert r.devicestatus_rows_examined == 0
+    assert "No devicestatus rows" in r.recommendation
+
+
+def test_effective_isf_check_converts_mgdl_profile_units() -> None:
+    """profile_units='mg/dL' + sens=50 (mg/dL/U) → internal 2.8 mmol/L/U."""
+    base = datetime(2026, 5, 22, 12, 0, tzinfo=UTC)
+    sgvs, txs, _ = _correction_with_drop(base, 140, 90, 1.0)
+    dss = [_ds(base - timedelta(minutes=5), sens=50)]  # 50 mg/dL/U
+    r = effective_isf_check(txs, sgvs, dss, profile_units="mg/dL")
+    # 50 mg/dL/U → 2.8 mmol/L/U via the conventional ÷18 factor (units.py).
+    # realized = 50 mg/dL drop / 1U → also 2.8 mmol/U → ratio 1.0
+    assert r.sample_count == 1
+    assert r.avg_effective_isf_mmol_per_unit == 2.8
+    assert r.overall_ratio_realized_over_effective == 1.0
+
+
+def test_effective_isf_check_handles_mmol_profile_units() -> None:
+    """profile_units='mmol' + sens=2.8 → no conversion."""
+    base = datetime(2026, 5, 22, 12, 0, tzinfo=UTC)
+    sgvs, txs, dss = _correction_with_drop(base, 140, 90, 1.0, sens_at_decision=2.8)
+    r = effective_isf_check(txs, sgvs, dss, profile_units="mmol")
+    assert r.sample_count == 1
+    assert r.avg_effective_isf_mmol_per_unit == 2.8
+
+
+def test_effective_isf_check_picks_most_recent_prior_devicestatus() -> None:
+    """Two rows before the bolus at -3min and -8min; uses the -3min (most recent) row."""
+    base = datetime(2026, 5, 22, 12, 0, tzinfo=UTC)
+    sgvs, txs, _ = _correction_with_drop(base, 140, 90, 1.0)
+    dss = [
+        _ds(base - timedelta(minutes=8), sens=5.0),  # older, would give different ratio
+        _ds(base - timedelta(minutes=3), sens=2.8),  # most recent prior
+    ]
+    r = effective_isf_check(txs, sgvs, dss, profile_units="mmol")
+    assert r.sample_count == 1
+    assert r.avg_effective_isf_mmol_per_unit == 2.8
+
+
+def test_effective_isf_check_skips_devicestatus_after_bolus() -> None:
+    """Only post-bolus row exists → sample excluded (no prior match)."""
+    base = datetime(2026, 5, 22, 12, 0, tzinfo=UTC)
+    sgvs, txs, _ = _correction_with_drop(base, 140, 90, 1.0)
+    dss = [_ds(base + timedelta(minutes=2), sens=2.8)]  # AFTER the bolus
+    r = effective_isf_check(txs, sgvs, dss, profile_units="mmol")
+    assert r.sample_count == 0
+    assert r.samples_without_sens == 1
+
+
+def test_effective_isf_check_reads_aaps_variable_sens_field() -> None:
+    """AAPS Dynamic ISF publishes `variable_sens` (mg/dL/U) instead of oref0's
+    `sens` field. Discovered against gladoctopus.my.nightscoutpro.com on
+    2026-05-23: 5396 devicestatus rows, zero with `sens`, all with
+    `variable_sens` ranging 109-110 mg/dL/U.
+    """
+    base = datetime(2026, 5, 22, 12, 0, tzinfo=UTC)
+    sgvs, txs, _ = _correction_with_drop(base, 140, 90, 1.0)
+    # variable_sens=50 mg/dL/U → 2.8 mmol/L/U after conversion
+    dss = [_ds(base - timedelta(minutes=5), variable_sens=50)]
+    r = effective_isf_check(txs, sgvs, dss, profile_units="mmol")
+    assert r.sample_count == 1
+    assert r.avg_effective_isf_mmol_per_unit == 2.8
+    # realized drop = 50 mg/dL/U → 2.8 mmol/U → ratio 1.0
+    assert r.overall_ratio_realized_over_effective == 1.0
+
+
+def test_effective_isf_check_variable_sens_wins_over_sens_when_both_present() -> None:
+    """If a row carries BOTH fields (unusual but possible), variable_sens wins —
+    it's the AAPS-native, more-recent convention.
+    """
+    base = datetime(2026, 5, 22, 12, 0, tzinfo=UTC)
+    sgvs, txs, _ = _correction_with_drop(base, 140, 90, 1.0)
+    # variable_sens=50 mg/dL/U → 2.8 mmol/L/U; sens=5.0 mmol/L/U (would be different)
+    dss = [_ds(base - timedelta(minutes=5), variable_sens=50, sens=5.0)]
+    r = effective_isf_check(txs, sgvs, dss, profile_units="mmol")
+    assert r.avg_effective_isf_mmol_per_unit == 2.8  # from variable_sens, not sens
+
+
+def test_effective_isf_check_band_boundary_assignment() -> None:
+    """Pre-bolus BG exactly 100 → falls in in_target (half-open [100,180))."""
+    base = datetime(2026, 5, 22, 12, 0, tzinfo=UTC)
+    sgvs, txs, dss = _correction_with_drop(base, 100, 70, 1.0, sens_at_decision=2.8)
+    r = effective_isf_check(txs, sgvs, dss, profile_units="mmol")
+    by = {b.band_label: b for b in r.by_bg_band}
+    assert by["in_target"].sample_count == 1
+    assert by["below_target"].sample_count == 0
+    # And 180 should fall in above_target
+    sgvs2, txs2, dss2 = _correction_with_drop(
+        base + timedelta(days=1), 180, 130, 1.0, sens_at_decision=2.8
+    )
+    r2 = effective_isf_check(txs2, sgvs2, dss2, profile_units="mmol")
+    by2 = {b.band_label: b for b in r2.by_bg_band}
+    assert by2["above_target"].sample_count == 1
+    assert by2["in_target"].sample_count == 0

@@ -11,6 +11,7 @@ diagnoses.
 
 from __future__ import annotations
 
+import contextlib
 import statistics
 from datetime import datetime, timedelta
 
@@ -19,6 +20,8 @@ from .models import (
     CrDerivation,
     DailyReport,
     DetectedPatterns,
+    EffectiveIsfDerivation,
+    IsfBandSample,
     IsfDerivation,
     MealAnalysis,
     OvernightAnalysis,
@@ -40,6 +43,19 @@ COMPRESSION_MAX_DURATION_MIN = 30
 
 # Dawn phenomenon: BG rising from ~03:00 to wake (~07:00) by >X mg/dL
 DAWN_RISE_THRESHOLD_MGDL = 30
+
+# effective_isf_check: tolerance for matching a bolus to the most-recent prior
+# devicestatus row carrying `openaps.suggested.sens`. AAPS publishes
+# devicestatus every ~5 min when looping but uploaders can be flaky.
+EFFECTIVE_ISF_SENS_MATCH_WINDOW_MIN = 15
+
+# BG bands for effective_isf_check. Half-open intervals: a sample with pre-bolus
+# BG exactly at `upper` falls into the NEXT band. Upper=None = open top.
+ISF_BG_BANDS: list[tuple[str, int, int | None]] = [
+    ("below_target", 0, 100),
+    ("in_target", 100, 180),
+    ("above_target", 180, None),
+]
 
 
 def daily_report(
@@ -466,6 +482,336 @@ def insulin_sensitivity_check(
         ratio_derived_over_profile=round(ratio, 2) if ratio is not None else None,
         confidence=confidence,
         recommendation=recommendation,
+    )
+
+
+def _ds_created_at(ds: dict) -> datetime | None:
+    """Parse a devicestatus row's created_at into UTC. None if absent/invalid."""
+    iso = ds.get("created_at")
+    if not iso:
+        return None
+    try:
+        return parse_iso_to_utc(iso)
+    except Exception:
+        return None
+
+
+def _ds_sens_mmol(ds: dict, profile_units: str) -> float | None:
+    """Read the effective ISF from a devicestatus row, return in mmol/L/U.
+
+    Two field conventions seen in real Nightscout data:
+      - **AAPS Dynamic ISF**: `openaps.suggested.variable_sens` (mg/dL/U
+        regardless of profile units — AAPS internal calculation is always mg/dL).
+      - **oref0 / Loop / older AAPS**: `openaps.suggested.sens` (in profile units).
+
+    We try `variable_sens` first (more specific, more recently added) and fall
+    back to `sens`. Returns None if neither is present or both are invalid.
+    """
+    openaps = ds.get("openaps")
+    if not isinstance(openaps, dict):
+        return None
+    suggested = openaps.get("suggested")
+    if not isinstance(suggested, dict):
+        return None
+    # AAPS Dynamic ISF — always mg/dL/U
+    var_sens = suggested.get("variable_sens")
+    if isinstance(var_sens, (int, float)) and var_sens > 0:
+        return mgdl_to_mmol(float(var_sens))
+    # oref0 standard — profile units
+    sens = suggested.get("sens")
+    if isinstance(sens, (int, float)) and sens > 0:
+        val = float(sens)
+        return mgdl_to_mmol(val) if profile_units == "mg/dL" else val
+    return None
+
+
+def _assign_band(mgdl: int) -> tuple[str, int, int | None]:
+    """Return (label, lower, upper) for the band the given BG falls into."""
+    for label, lower, upper in ISF_BG_BANDS:
+        if mgdl >= lower and (upper is None or mgdl < upper):
+            return label, lower, upper
+    # Fallback (shouldn't happen with current ISF_BG_BANDS): below 0
+    return ISF_BG_BANDS[0]
+
+
+def effective_isf_check(
+    treatments: list[Treatment],
+    sgvs: list[Sgv],
+    devicestatuses: list[dict],
+    profile_units: str = "mmol",
+    dia_hours: float = 5.0,
+) -> EffectiveIsfDerivation:
+    """Compare AAPS's per-correction effective ISF to realized BG drops.
+
+    For each isolated correction bolus (same eligibility filter as
+    insulin_sensitivity_check), we look up the most-recent devicestatus row
+    strictly BEFORE the bolus and within ±EFFECTIVE_ISF_SENS_MATCH_WINDOW_MIN
+    minutes. We read `openaps.suggested.sens` from that row — the effective
+    ISF AAPS used at decision time — and compare it to the realized drop in
+    the next DIA hours, stratified by pre-bolus BG band.
+
+    Args:
+        treatments: All treatments in the lookback window.
+        sgvs: All SGVs in the lookback window.
+        devicestatuses: Raw devicestatus rows (we read openaps.suggested.sens).
+        profile_units: "mg/dL" or "mmol". `sens` is in profile units.
+        dia_hours: Duration of insulin action. Clamped to 5h max.
+
+    Returns: EffectiveIsfDerivation with per-band breakdown and recommendation.
+
+    Note: this tool is heavier than insulin_sensitivity_check because
+    devicestatus collections carry ~288 rows/day (every ~5 min) of deeply
+    nested openaps blobs. For days=30 the dataset is ~8600 rows.
+    """
+    sgv_sorted = sorted(sgvs, key=lambda r: parse_iso_to_utc(r.date_iso))
+    # Sort devicestatuses ascending by created_at so we can do an O(log N)-ish
+    # search via bisect... but actually for simplicity and N≈8600, linear scan
+    # per correction is fine (typical corrections ≈ 100/14d). We pre-compute
+    # the (datetime, ds) list to avoid re-parsing ISO strings repeatedly.
+    ds_with_time: list[tuple[datetime, dict]] = sorted(
+        ((ts, ds) for ds in devicestatuses if (ts := _ds_created_at(ds)) is not None),
+        key=lambda pair: pair[0],
+    )
+
+    # Carb timestamps (any nonzero carb meal) for the "no carbs ±60 min" filter.
+    carb_times: list[datetime] = []
+    for t in treatments:
+        if t.carbs and t.carbs > 0:
+            with contextlib.suppress(Exception):
+                carb_times.append(parse_iso_to_utc(t.created_at))
+
+    # Group eligible samples by band.
+    per_band_effective_mmol: dict[str, list[float]] = {label: [] for label, _, _ in ISF_BG_BANDS}
+    per_band_realized_mmol: dict[str, list[float]] = {label: [] for label, _, _ in ISF_BG_BANDS}
+    samples_without_sens = 0
+    total_eligible = 0  # corrections that passed all OTHER filters
+    match_window = timedelta(minutes=EFFECTIVE_ISF_SENS_MATCH_WINDOW_MIN)
+
+    for tx in treatments:
+        if not tx.insulin or tx.insulin <= 0:
+            continue
+        if tx.carbs and tx.carbs > 0:
+            continue
+        if "Correction" not in tx.event_type and tx.event_type != "Bolus":
+            continue
+        try:
+            tx_time = parse_iso_to_utc(tx.created_at)
+        except Exception:
+            continue
+        # No carb entry within ±60 min
+        ate_nearby = any(
+            abs((c - tx_time).total_seconds()) <= 3600 for c in carb_times
+        )
+        if ate_nearby:
+            continue
+
+        # Pre-bolus SGV (closest ≤ tx_time) and post-bolus min within DIA
+        pre_sgv: Sgv | None = None
+        post_window_end = tx_time + timedelta(hours=min(dia_hours, 5.0))
+        post_sgvs: list[Sgv] = []
+        for s in sgv_sorted:
+            ts = parse_iso_to_utc(s.date_iso)
+            if ts <= tx_time:
+                pre_sgv = s
+            elif ts <= post_window_end:
+                post_sgvs.append(s)
+        if not pre_sgv or not post_sgvs:
+            continue
+        min_post = min(post_sgvs, key=lambda r: r.sgv_mgdl)
+        drop = pre_sgv.sgv_mgdl - min_post.sgv_mgdl
+        if drop <= 0 or (drop / tx.insulin) > 500:
+            continue
+        realized_isf_mgdl = drop / tx.insulin
+
+        total_eligible += 1
+
+        # Find most-recent devicestatus row STRICTLY before tx_time, within window.
+        # _ds_sens_mmol handles the AAPS-vs-oref0 field-name difference and
+        # returns a normalized mmol/L/U value.
+        matched_sens_mmol: float | None = None
+        for ts, ds in reversed(ds_with_time):
+            if ts >= tx_time:
+                continue
+            if tx_time - ts > match_window:
+                break  # too old; sorted ascending so all earlier also too old
+            candidate = _ds_sens_mmol(ds, profile_units)
+            if candidate is None:
+                continue
+            matched_sens_mmol = candidate
+            break
+
+        if matched_sens_mmol is None:
+            samples_without_sens += 1
+            continue
+
+        # Assign to BG band and record
+        band_label, _, _ = _assign_band(pre_sgv.sgv_mgdl)
+        per_band_effective_mmol[band_label].append(matched_sens_mmol)
+        per_band_realized_mmol[band_label].append(mgdl_to_mmol(realized_isf_mgdl))
+
+    # Aggregate per-band
+    by_bg_band: list[IsfBandSample] = []
+    all_effective: list[float] = []
+    all_realized: list[float] = []
+    for label, lower, upper in ISF_BG_BANDS:
+        effs = per_band_effective_mmol[label]
+        reas = per_band_realized_mmol[label]
+        n = len(effs)
+        all_effective.extend(effs)
+        all_realized.extend(reas)
+        if n == 0:
+            by_bg_band.append(
+                IsfBandSample(
+                    band_label=label,
+                    band_lower_mgdl=lower,
+                    band_upper_mgdl=upper,
+                    sample_count=0,
+                    avg_effective_isf_mmol_per_unit=None,
+                    avg_realized_isf_mmol_per_unit=None,
+                    ratio_realized_over_effective=None,
+                    note="No eligible corrections in this band.",
+                )
+            )
+            continue
+        avg_eff = statistics.fmean(effs)
+        avg_rea = statistics.fmean(reas)
+        ratio = avg_rea / avg_eff if avg_eff else None
+        note: str | None = None
+        if n < 3:
+            note = f"Only {n} sample(s) — too few for a reliable band ratio."
+        by_bg_band.append(
+            IsfBandSample(
+                band_label=label,
+                band_lower_mgdl=lower,
+                band_upper_mgdl=upper,
+                sample_count=n,
+                avg_effective_isf_mmol_per_unit=round(avg_eff, 2),
+                avg_realized_isf_mmol_per_unit=round(avg_rea, 2),
+                ratio_realized_over_effective=round(ratio, 2) if ratio is not None else None,
+                note=note,
+            )
+        )
+
+    sample_count = len(all_effective)
+
+    # Confidence by total samples (matches existing pattern in IsfDerivation).
+    if sample_count < 3:
+        confidence = "low"
+    elif sample_count < 8:
+        confidence = "medium"
+    else:
+        confidence = "high"
+
+    overall_eff = statistics.fmean(all_effective) if all_effective else None
+    overall_rea = statistics.fmean(all_realized) if all_realized else None
+    overall_ratio = (
+        (overall_rea / overall_eff) if overall_eff and overall_rea else None
+    )
+
+    # Recommendation
+    safety = " These signals are advisory. Do not change AAPS settings without consulting your healthcare provider."
+
+    if sample_count == 0:
+        # Distinguish "no devicestatus" from "AAPS rows present but no sens"
+        any_sens = any(
+            _ds_sens_mmol(ds, profile_units) is not None for ds in devicestatuses
+        )
+        if len(devicestatuses) == 0:
+            rec = (
+                "No devicestatus rows in the lookback window. This tool requires "
+                "AAPS (or another OpenAPS-style loop) publishing devicestatus to "
+                "Nightscout. If you're not running an automated loop, use "
+                "insulin_sensitivity_check instead." + safety
+            )
+        elif not any_sens:
+            rec = (
+                "Devicestatus rows present but none carry openaps.suggested.sens — "
+                "Dynamic ISF may be disabled in your AAPS settings, or your uploader "
+                "isn't syncing the full openaps blob. If you don't run Dynamic ISF, "
+                "use insulin_sensitivity_check instead." + safety
+            )
+        else:
+            rec = (
+                f"Found {total_eligible} eligible correction(s) but none could be paired "
+                f"with a devicestatus row within ±{EFFECTIVE_ISF_SENS_MATCH_WINDOW_MIN} min. "
+                "Your uploader may be syncing devicestatus on a much slower cadence than "
+                "expected." + safety
+            )
+        return EffectiveIsfDerivation(
+            sample_count=0,
+            devicestatus_rows_examined=len(devicestatuses),
+            samples_without_sens=samples_without_sens,
+            avg_effective_isf_mmol_per_unit=None,
+            avg_realized_isf_mmol_per_unit=None,
+            overall_ratio_realized_over_effective=None,
+            confidence="low",
+            by_bg_band=by_bg_band,
+            recommendation=rec,
+        )
+
+    # Build per-band ratio map for the divergent-band check
+    band_ratios: dict[str, float | None] = {
+        b.band_label: b.ratio_realized_over_effective for b in by_bg_band
+    }
+    in_target = band_ratios.get("in_target")
+    above_target = band_ratios.get("above_target")
+    below_target = band_ratios.get("below_target")
+
+    if overall_ratio is None:
+        rec_core = "Insufficient data to compute an overall ratio."
+    elif 0.85 <= overall_ratio <= 1.15:
+        rec_core = (
+            f"Dynamic ISF is well-calibrated against your real outcomes "
+            f"(overall ratio {overall_ratio:.2f}, within ±15% of 1.0)."
+        )
+    elif overall_ratio > 1.15:
+        rec_core = (
+            f"AAPS appears to over-dose corrections (overall ratio "
+            f"{overall_ratio:.2f}: realized BG drop averaged {overall_rea:.1f} mmol/L per U "
+            f"but AAPS used effective ISF averaging {overall_eff:.1f}). The AAPS docs say "
+            "to LOWER the Adjustment Factor (lower % → larger effective ISF → "
+            "less aggressive corrections)."
+        )
+    else:
+        rec_core = (
+            f"AAPS appears to under-dose corrections (overall ratio "
+            f"{overall_ratio:.2f}: realized BG drop averaged {overall_rea:.1f} mmol/L per U "
+            f"but AAPS used effective ISF averaging {overall_eff:.1f}). The AAPS docs say "
+            "to RAISE the Adjustment Factor (higher % → smaller effective ISF → "
+            "more aggressive corrections)."
+        )
+
+    # Detect BG-curve divergence: in-target tracks well but a tails band runs hot/cold.
+    curve_note = ""
+    if (
+        in_target is not None and 0.85 <= in_target <= 1.15
+        and above_target is not None and above_target > 1.15
+    ):
+        curve_note = (
+            f" However, in-target tracks well ({in_target:.2f}) while above-target runs "
+            f"hot ({above_target:.2f}) — this is a BG-curve calibration issue (the "
+            "BG-dependent dampening parameter), not an Adjustment Factor issue."
+        )
+    elif (
+        in_target is not None and 0.85 <= in_target <= 1.15
+        and below_target is not None and below_target > 1.15
+    ):
+        curve_note = (
+            f" However, in-target tracks well ({in_target:.2f}) while below-target runs "
+            f"hot ({below_target:.2f}) — note that hypo-treatment carbs may be polluting "
+            "the below-target sample; treat this signal with caution."
+        )
+
+    return EffectiveIsfDerivation(
+        sample_count=sample_count,
+        devicestatus_rows_examined=len(devicestatuses),
+        samples_without_sens=samples_without_sens,
+        avg_effective_isf_mmol_per_unit=round(overall_eff, 2) if overall_eff else None,
+        avg_realized_isf_mmol_per_unit=round(overall_rea, 2) if overall_rea else None,
+        overall_ratio_realized_over_effective=round(overall_ratio, 2) if overall_ratio else None,
+        confidence=confidence,
+        by_bg_band=by_bg_band,
+        recommendation=rec_core + curve_note + safety,
     )
 
 

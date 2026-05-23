@@ -7,6 +7,9 @@
 LANDSCAPE.md
 notes/
 
+# Claude Code local settings (per-machine, not for the repo)
+.claude/settings.local.json
+
 # Python
 __pycache__/
 *.py[cod]
