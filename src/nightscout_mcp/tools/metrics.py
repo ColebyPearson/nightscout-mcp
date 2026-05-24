@@ -20,6 +20,7 @@ Tools added (15 new MCP tools, 20 → 35 total):
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -28,6 +29,7 @@ from .. import metrics as M
 from ..client import NightscoutClient
 from ..models import (
     AgpHourPoint,
+    AgpMarkdownRender,
     AmbulatoryGlucoseProfile,
     BgRiskIndices,
     BolusBandAggregate,
@@ -36,12 +38,19 @@ from ..models import (
     ChangePoint,
     ChangePointReport,
     ClinicPacket,
+    ConsensusTargetAudit,
     DiaFitResult,
+    DynIsfRecommendation,
     GlucoseVariability,
     GlycemiaRiskIndex,
     MealPeriodReport,
     MealPeriodTir,
+    PeriodCompareReport,
+    PeriodMetrics,
+    SettingChangeAttribution,
+    SettingChangeAttributionReport,
     Sgv,
+    TargetCheck,
     TirBands,
     TirWithCI,
     Treatment,
@@ -770,6 +779,569 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
             headline_findings=findings,
         )
 
+    # ------------------------------------------------------------------------
+    # Section C — Composition tools on top of the metrics suite
+    # ------------------------------------------------------------------------
+
+    @mcp.tool()
+    async def dynisf_adjustment_recommender(days: int = 14) -> DynIsfRecommendation:
+        """Recommend a Dynamic ISF Adjustment Factor based on observed bolus residuals.
+
+        Reads the same data as bolus_event_residuals and applies the decision
+        tree from the 2026-05-24 deep research report (Topic 7 / Key Finding #1):
+
+          - Overall ratio within +/-15% of 1.0  -> HOLD current AF
+          - Ratio > 1.15 with monotone-with-BG (over_250 > 180_250 > 140_180 ≈ 1.0)
+              -> "BG-curve dampening" signature; lower AF further OR raise target.
+          - Ratio > 1.15 with flat-across-bands -> uniform over-aggression; lower AF.
+          - Ratio < 0.85 -> raise AF.
+          - Sample count < 20 -> insufficient data.
+
+        Returns the current AAPS DynISFAdjust, a recommended value (or None for
+        hold), a confidence band, and reasoning text suitable for sharing with
+        the care team.
+
+        **Discussion aid only — clinical changes must be reviewed with the
+        diabetes care team.** AAPS Objectives discipline applies: change one
+        lever at a time, hold 7-14 days, re-evaluate.
+        """
+        client = get_client()
+        days = max(7, min(days, 90))
+        end = _now_utc_midnight_plus_one()
+        start = end - timedelta(days=days)
+        sgvs = await _fetch_sgvs_between(client, start, end)
+        treatments = await _fetch_treatments_between(client, start, end)
+        devicestatus = await _fetch_devicestatus_between(client, start, end)
+        _, _, dia_hours, _ = await _extract_profile_settings(client)
+        current_af = await _read_current_dynisf_adjust(client)
+
+        events = _build_bolus_events(sgvs, treatments, devicestatus, dia_hours)
+        by_bg_band = _aggregate(events, lambda e: e.bg_band)
+        with_isf = [
+            e for e in events
+            if e.realized_isf_mgdl_per_u and e.aaps_effective_isf_mgdl_per_u
+        ]
+        n = len(with_isf)
+        if n > 0:
+            ratios = [
+                e.realized_isf_mgdl_per_u / e.aaps_effective_isf_mgdl_per_u
+                for e in with_isf
+            ]
+            overall = sum(ratios) / len(ratios)
+        else:
+            overall = 0.0
+
+        def _band_ratio(*names: str) -> float | None:
+            band = next((b for b in by_bg_band if b.band_name in names), None)
+            return band.isf_ratio_realized_vs_effective if band and band.sample_count >= 3 else None
+
+        in_target_ratio = _band_ratio("100_140", "140_180")
+        above_target_ratio = _band_ratio("180_250", "over_250")
+
+        # Decision tree
+        if n < 20:
+            recommendation_type = "insufficient_data"
+            recommended_af = None
+            confidence = "low"
+            reasoning = (
+                f"Only {n} bolus events matched with AAPS effective ISF in the {days}-day "
+                f"window. Need ≥20 for a meaningful recommendation. Accumulate more data."
+            )
+        elif 0.85 <= overall <= 1.15:
+            recommendation_type = "hold"
+            recommended_af = current_af
+            confidence = "high" if n >= 30 else "medium"
+            reasoning = (
+                f"Overall ratio {overall:.2f} is within +/-15% of 1.0 across {n} events. "
+                f"AAPS Dynamic ISF is well-calibrated against realized outcomes. "
+                f"Hold current AF={current_af}."
+            )
+        elif overall > 1.15:
+            # Detect curve-dampening signature
+            curve_signature = (
+                above_target_ratio is not None and above_target_ratio > 1.3 and
+                in_target_ratio is not None and 0.85 <= in_target_ratio <= 1.25
+            )
+            if curve_signature:
+                recommendation_type = "dampen_curve"
+                # Recommend a SLIGHT additional AF reduction; if already low, prefer target adjustment
+                if current_af <= 25:
+                    recommended_af = current_af  # signal "consider target raise instead"
+                    reasoning = (
+                        f"BG-curve dampening signature detected: in-target ratio "
+                        f"{in_target_ratio:.2f} (~1.0), above-target ratio "
+                        f"{above_target_ratio:.2f} (>1.3). Current AF={current_af} is "
+                        f"already low; further reduction risks under-dosing in-target. "
+                        f"Consider a small TARGET RAISE (e.g. +0.3 mmol/L) or longer DIA "
+                        f"reduction trial INSTEAD of further AF lowering. Discuss with care team."
+                    )
+                else:
+                    recommended_af = max(20, current_af - 5)
+                    reasoning = (
+                        f"BG-curve dampening signature detected: in-target ratio "
+                        f"{in_target_ratio:.2f} (~1.0), above-target ratio "
+                        f"{above_target_ratio:.2f} (>1.3). AAPS is over-dosing at high BG "
+                        f"specifically. Trial AF={recommended_af} (was {current_af}) for "
+                        f"7-14 days; expect above-target ratio to move toward 1.0 while "
+                        f"in-target ratio stays close to 1.0."
+                    )
+                confidence = "high" if n >= 40 else "medium"
+            else:
+                recommendation_type = "lower_af"
+                recommended_af = max(20, current_af - 5)
+                confidence = "medium"
+                reasoning = (
+                    f"Overall ratio {overall:.2f} > 1.15 across {n} events, with flatter "
+                    f"pattern across bands (in-target {in_target_ratio}, above-target "
+                    f"{above_target_ratio}). Consider lowering AF from {current_af} to "
+                    f"{recommended_af}. Re-evaluate after 7-14 days."
+                )
+        else:  # overall < 0.85
+            recommendation_type = "raise_af"
+            recommended_af = min(100, current_af + 5)
+            confidence = "medium"
+            reasoning = (
+                f"Overall ratio {overall:.2f} < 0.85 across {n} events — AAPS appears to be "
+                f"UNDER-dosing (realized drop smaller than predicted). Consider raising AF "
+                f"from {current_af} to {recommended_af}. Re-evaluate after 7-14 days."
+            )
+
+        return DynIsfRecommendation(
+            current_af=current_af,
+            recommended_af=recommended_af,
+            recommendation_type=recommendation_type,
+            overall_ratio=round(overall, 3),
+            in_target_ratio=round(in_target_ratio, 3) if in_target_ratio else None,
+            above_target_ratio=round(above_target_ratio, 3) if above_target_ratio else None,
+            confidence=confidence,
+            sample_count=n,
+            reasoning=reasoning,
+            caveat_text=(
+                "Discussion aid only. Do not change AAPS settings without consulting the "
+                "diabetes care team. AAPS Objectives recommends one lever at a time, hold "
+                "7-14 days, re-evaluate. The AAPS DynISFAdjust is stored in the encrypted "
+                "settings export, not in Nightscout; current_af here is read from the AAPS "
+                "Drive export if available, else defaults to the cysSETTINGS-tracked value."
+            ),
+        )
+
+    @mcp.tool()
+    async def consensus_target_audit(days: int = 14) -> ConsensusTargetAudit:
+        """One-shot audit of metrics vs. published consensus targets.
+
+        Compares the patient's TIR, TBR<54, TAR>180, CV, GRI, LBGI, HBGI, and
+        GMI against the Battelino 2019, ISPAD 2022, Klonoff 2023, and Kovatchev
+        thresholds. Returns a per-metric pass/fail table + summary.
+
+        Useful for "in 30 seconds, which of my numbers are off-target?"
+        """
+        client = get_client()
+        days = max(7, min(days, 90))
+        start, end = _window_for_days(days)
+        sgvs = await _fetch_sgvs_between(client, start, end)
+        values = M._sgv_to_mgdl_list(sgvs)
+        M._sgv_to_pairs(sgvs)
+        n = len(values)
+
+        if n == 0:
+            return ConsensusTargetAudit(
+                days=days,
+                checks=[],
+                summary_pass_count=0,
+                summary_fail_count=0,
+                headline="No CGM data in window — cannot audit.",
+            )
+
+        # Compute every metric
+        tir = sum(1 for v in values if 70 <= v <= 180) / n * 100
+        tbr_54 = sum(1 for v in values if v < 54) / n * 100
+        tbr_70 = sum(1 for v in values if v < 70) / n * 100
+        tar_180 = sum(1 for v in values if v > 180) / n * 100
+        tar_250 = sum(1 for v in values if v > 250) / n * 100
+        cv = M.cv_percent(values)
+        mean_bg = sum(values) / n
+        gmi = M.gmi_percent(mean_bg)
+        gri_data = M.gri(values)
+        lbgi, hbgi = M.lbgi_hbgi(values)
+
+        checks: list[TargetCheck] = []
+
+        # Helper
+        def _make_check(name: str, value: float, target_desc: str, in_target: bool,
+                        direction: str, severity: str, citation: str) -> TargetCheck:
+            return TargetCheck(
+                metric_name=name,
+                metric_value=round(value, 3),
+                target_description=target_desc,
+                in_target=in_target,
+                direction=direction,
+                severity=severity,
+                citation=citation,
+            )
+
+        # TIR (pediatric T1D ≥70 percent per ADA / ISPAD)
+        checks.append(_make_check(
+            "TIR (70-180 mg/dL)", tir, ">70% (pediatric ADA / ISPAD 2022)",
+            tir >= 70, "above_target" if tir >= 70 else "below_target",
+            "ok" if tir >= 70 else ("borderline" if tir >= 60 else "over"),
+            "ISPAD 2022 (Sherr/de Bock); Battelino 2019",
+        ))
+        # TBR<54 (<1 percent per Battelino consensus)
+        checks.append(_make_check(
+            "TBR <54 mg/dL", tbr_54, "<1% (international consensus)",
+            tbr_54 < 1.0, "in_target" if tbr_54 < 1.0 else "above_target",
+            "ok" if tbr_54 < 1.0 else ("borderline" if tbr_54 < 2.0 else "severe"),
+            "Battelino 2019 Diabetes Care 42:1593",
+        ))
+        # TBR<70 (<4 percent per consensus)
+        checks.append(_make_check(
+            "TBR <70 mg/dL", tbr_70, "<4% (Battelino 2019)",
+            tbr_70 < 4.0, "in_target" if tbr_70 < 4.0 else "above_target",
+            "ok" if tbr_70 < 4.0 else ("borderline" if tbr_70 < 7.0 else "over"),
+            "Battelino 2019",
+        ))
+        # TAR>180 (<25 percent)
+        checks.append(_make_check(
+            "TAR >180 mg/dL", tar_180, "<25% (Battelino 2019)",
+            tar_180 < 25.0, "in_target" if tar_180 < 25.0 else "above_target",
+            "ok" if tar_180 < 25.0 else ("borderline" if tar_180 < 40.0 else "over"),
+            "Battelino 2019",
+        ))
+        # TAR>250 (<5 percent)
+        checks.append(_make_check(
+            "TAR >250 mg/dL", tar_250, "<5% (Battelino 2019)",
+            tar_250 < 5.0, "in_target" if tar_250 < 5.0 else "above_target",
+            "ok" if tar_250 < 5.0 else ("borderline" if tar_250 < 10.0 else "over"),
+            "Battelino 2019",
+        ))
+        # CV (<36 percent)
+        checks.append(_make_check(
+            "CV", cv, "<36% (Battelino 2019)",
+            cv < 36.0, "in_target" if cv < 36.0 else "above_target",
+            "ok" if cv < 36.0 else ("borderline" if cv < 42.0 else "over"),
+            "Battelino 2019; Monnier 2008",
+        ))
+        # GMI (no fixed target — surfaced for reference vs. HbA1c)
+        checks.append(_make_check(
+            "GMI", gmi, "<7% (target proxy)",
+            gmi < 7.0, "in_target" if gmi < 7.0 else "above_target",
+            "ok" if gmi < 7.0 else ("borderline" if gmi < 8.0 else "over"),
+            "Bergenstal 2018 Diabetes Care 41:2275",
+        ))
+        # LBGI (<2.5 = low/moderate)
+        checks.append(_make_check(
+            "LBGI", lbgi, "<2.5 (low/moderate hypo risk)",
+            lbgi < 2.5, "in_target" if lbgi < 2.5 else "above_target",
+            "ok" if lbgi < 2.5 else ("borderline" if lbgi < 5.0 else "severe"),
+            "Kovatchev 1998 Diabetes Care 21:1870",
+        ))
+        # HBGI (<9 = low/moderate)
+        checks.append(_make_check(
+            "HBGI", hbgi, "<9.0 (low/moderate hyper risk)",
+            hbgi < 9.0, "in_target" if hbgi < 9.0 else "above_target",
+            "ok" if hbgi < 9.0 else ("borderline" if hbgi < 15.0 else "severe"),
+            "Kovatchev 1998 Diabetes Care 21:1870",
+        ))
+        # GRI (no formal target threshold; Klonoff suggests <50 = good control)
+        checks.append(_make_check(
+            "GRI", gri_data["gri"], "<50 (suggested good control)",
+            gri_data["gri"] < 50.0, "in_target" if gri_data["gri"] < 50.0 else "above_target",
+            "ok" if gri_data["gri"] < 50.0 else ("borderline" if gri_data["gri"] < 70.0 else "over"),
+            "Klonoff 2023 JDST 17:1226",
+        ))
+
+        passed = sum(1 for c in checks if c.in_target)
+        failed = sum(1 for c in checks if not c.in_target)
+        worst = [c.metric_name for c in checks if c.severity == "severe"]
+        if not failed:
+            headline = "All consensus targets met. Current settings appear well-tuned."
+        elif worst:
+            headline = (
+                f"{failed}/{len(checks)} consensus targets unmet. "
+                f"Severe-band metrics requiring attention: {', '.join(worst)}."
+            )
+        else:
+            headline = f"{failed}/{len(checks)} consensus targets unmet (none severe)."
+
+        return ConsensusTargetAudit(
+            days=days,
+            checks=checks,
+            summary_pass_count=passed,
+            summary_fail_count=failed,
+            headline=headline,
+        )
+
+    @mcp.tool()
+    async def settings_change_attribution(
+        days: int = 30, pre_post_days: int = 7
+    ) -> SettingChangeAttributionReport:
+        """For each profile-switch event in the window, compute pre vs. post outcome shift.
+
+        Methodology:
+          1. Find all profile-switch events in the analysis window.
+          2. For each event, compute TIR / TBR<54 / GRI for the `pre_post_days` window
+             BEFORE and AFTER.
+          3. Apply a binomial proportion test (Wilson-derived approx p-value) to
+             pre/post TIR difference.
+          4. Apply Benjamini-Hochberg FDR correction across all events (q=0.10) to
+             control false discovery rate when scanning multiple changes.
+
+        Useful for "which of my recent settings changes actually moved the needle?"
+        without falling into the classic multiple-comparison trap.
+
+        Args:
+            days: total scan window (max 90, default 30)
+            pre_post_days: window size on each side of each change (default 7)
+        """
+        client = get_client()
+        days = max(14, min(days, 90))
+        pre_post_days = max(3, min(pre_post_days, 14))
+        end = _now_utc_midnight_plus_one()
+        start = end - timedelta(days=days)
+        treatments = await _fetch_treatments_between(client, start, end)
+
+        # Find profile switch events
+        switches: list[Treatment] = [
+            t for t in treatments
+            if t.event_type == "Profile Switch" and t.created_at
+        ]
+        if not switches:
+            return SettingChangeAttributionReport(
+                window_days=days,
+                change_window_pre_days=pre_post_days,
+                change_window_post_days=pre_post_days,
+                fdr_q=0.10,
+                change_events=[],
+            )
+
+        # Fetch SGVs for the whole window (one shot)
+        sgvs = await _fetch_sgvs_between(client, start, end)
+        pairs = M._sgv_to_pairs(sgvs)
+
+        # For each switch, slice the pre/post windows
+        raw_events: list[tuple[Treatment, dict[str, Any]]] = []
+        for sw in switches:
+            try:
+                sw_ts = parse_iso_to_utc(sw.created_at)
+            except Exception:
+                continue
+            pre_start = sw_ts - timedelta(days=pre_post_days)
+            post_end = sw_ts + timedelta(days=pre_post_days)
+            pre_vals = [v for ts, v in pairs if pre_start <= ts < sw_ts]
+            post_vals = [v for ts, v in pairs if sw_ts <= ts < post_end]
+            if len(pre_vals) < 50 or len(post_vals) < 50:
+                continue
+            pre_metrics = _compute_change_window_metrics(pre_vals)
+            post_metrics = _compute_change_window_metrics(post_vals)
+            # Binomial proportion p (two-proportion z-test approximation)
+            p = _two_proportion_p_value(
+                int(pre_metrics["in_range_count"]), len(pre_vals),
+                int(post_metrics["in_range_count"]), len(post_vals),
+            )
+            raw_events.append((
+                sw,
+                {
+                    "pre": pre_metrics,
+                    "post": post_metrics,
+                    "p_value": p,
+                }
+            ))
+
+        # FDR correction (Benjamini-Hochberg)
+        p_values = [data["p_value"] for _, data in raw_events]
+        fdr_q = 0.10
+        fdr_corrected = _bh_correct(p_values, fdr_q)
+
+        change_events: list[SettingChangeAttribution] = []
+        for (sw, data), p_corr in zip(raw_events, fdr_corrected, strict=False):
+            pre = data["pre"]
+            post = data["post"]
+            if p_corr < 0.10:
+                sig_band = "significant"
+            elif p_corr < 0.20:
+                sig_band = "borderline"
+            else:
+                sig_band = "not_significant"
+            change_events.append(SettingChangeAttribution(
+                change_timestamp_iso=sw.created_at,
+                profile_name=getattr(sw, "profile", None),
+                percentage=int(sw.percent) if sw.percent else None,
+                pre_window_days=pre_post_days,
+                post_window_days=pre_post_days,
+                pre_tir_pct=round(pre["tir_pct"], 2),
+                post_tir_pct=round(post["tir_pct"], 2),
+                delta_tir_pct=round(post["tir_pct"] - pre["tir_pct"], 2),
+                pre_tbr_lt54_pct=round(pre["tbr_lt54_pct"], 2),
+                post_tbr_lt54_pct=round(post["tbr_lt54_pct"], 2),
+                delta_tbr_lt54_pct=round(post["tbr_lt54_pct"] - pre["tbr_lt54_pct"], 2),
+                pre_gri=round(pre["gri"], 2),
+                post_gri=round(post["gri"], 2),
+                delta_gri=round(post["gri"] - pre["gri"], 2),
+                binomial_p_value_uncorrected=round(data["p_value"], 4),
+                binomial_p_value_fdr_corrected=round(p_corr, 4),
+                significance_band=sig_band,
+            ))
+
+        return SettingChangeAttributionReport(
+            window_days=days,
+            change_window_pre_days=pre_post_days,
+            change_window_post_days=pre_post_days,
+            fdr_q=fdr_q,
+            change_events=change_events,
+        )
+
+    @mcp.tool()
+    async def agp_markdown_render(days: int = 14, timezone: str | None = None) -> AgpMarkdownRender:
+        """Render the AGP percentile bands as a markdown table with ASCII visualization.
+
+        Pairs with `ambulatory_glucose_profile` (which returns raw data) — this
+        tool produces a human-readable rendering suitable for pasting into a
+        clinic note or shared with the care team.
+        """
+        client = get_client()
+        tz_name = timezone or await _resolve_timezone(client)
+        tz_offset_hours = _tz_offset_for(tz_name)
+        start, end = _window_for_days(days)
+        sgvs = await _fetch_sgvs_between(client, start, end)
+        pairs = M._sgv_to_pairs(sgvs)
+        hourly = M.agp_hourly_percentiles(pairs, tz_offset_hours=tz_offset_hours)
+
+        # Determine p50 min/max for the headline
+        p50_values = [h["p50"] for h in hourly if h["sample_count"] > 0]
+        if p50_values:
+            p50_min = min(p50_values)
+            p50_max = max(p50_values)
+            p50_min_hour = next(int(h["hour"]) for h in hourly if h.get("p50") == p50_min)
+            p50_max_hour = next(int(h["hour"]) for h in hourly if h.get("p50") == p50_max)
+        else:
+            p50_min = p50_max = 0.0
+            p50_min_hour = p50_max_hour = 0
+
+        # Build markdown table
+        lines = [
+            f"# Ambulatory Glucose Profile — {days}-day window",
+            "",
+            f"- Timezone: `{tz_name or 'UTC'}`",
+            f"- Median (p50) ranges from **{p50_min:.0f}** mg/dL (hour {p50_min_hour:02d}) "
+            f"to **{p50_max:.0f}** mg/dL (hour {p50_max_hour:02d})",
+            "",
+            "| Hour | n | p05 | p25 | **p50** | p75 | p95 | Visual (p25-p75 IQR band) |",
+            "|---|---|---|---|---|---|---|---|",
+        ]
+        # ASCII bars — IQR (p25 to p75) on a 0-400 scale, 40 chars wide
+        for h in hourly:
+            n = int(h["sample_count"])
+            p05 = h.get("p05", 0.0)
+            p25 = h.get("p25", 0.0)
+            p50 = h.get("p50", 0.0)
+            p75 = h.get("p75", 0.0)
+            p95 = h.get("p95", 0.0)
+            # Scale: 0-400 mg/dL maps to 40 chars
+            iqr_start = int(min(40, max(0, p25 / 10)))
+            iqr_end = int(min(40, max(0, p75 / 10)))
+            bar = (
+                " " * iqr_start +
+                "=" * max(1, iqr_end - iqr_start) +
+                " " * max(0, 40 - iqr_end)
+            )
+            # Mark p50 position with `*` if visible
+            p50_pos = int(min(40, max(0, p50 / 10)))
+            bar = bar[:p50_pos] + "*" + bar[p50_pos + 1:]
+            lines.append(
+                f"| {int(h['hour']):02d} | {n:4d} | {p05:5.0f} | {p25:5.0f} | "
+                f"**{p50:5.0f}** | {p75:5.0f} | {p95:5.0f} | `{bar}` |"
+            )
+        lines.extend([
+            "",
+            "Scale: each visual is 0-400 mg/dL across 40 chars (10 mg/dL per char). "
+            "`=` = IQR (p25 to p75), `*` = median (p50).",
+        ])
+        markdown_body = "\n".join(lines)
+
+        return AgpMarkdownRender(
+            days=max(1, min(days, 90)),
+            timezone=tz_name,
+            markdown_body=markdown_body,
+            p50_min_mgdl=round(p50_min, 1),
+            p50_max_mgdl=round(p50_max, 1),
+            p50_min_hour=p50_min_hour,
+            p50_max_hour=p50_max_hour,
+        )
+
+    @mcp.tool()
+    async def time_period_compare(
+        period_a_start: str,
+        period_a_end: str,
+        period_b_start: str,
+        period_b_end: str,
+        period_a_label: str = "pre",
+        period_b_label: str = "post",
+        timezone: str | None = None,
+    ) -> PeriodCompareReport:
+        """Side-by-side TIR + GRI + LBGI + HBGI + CV + GMI comparison across two windows.
+
+        Designed for outcome verification: "did the setting change I made on
+        date X actually move the needle?" Reports both raw deltas AND whether
+        the 95% confidence intervals on TIR + TBR<54 overlap (CI overlap = the
+        change is NOT statistically distinguishable from noise).
+
+        Args:
+            period_a_start, period_a_end: YYYY-MM-DD format, e.g. "2026-05-09"
+                inclusive start, exclusive end
+            period_b_start, period_b_end: same for the "post" window
+            period_a_label, period_b_label: human-readable labels (default
+                "pre"/"post")
+            timezone: Olson timezone name (e.g. "America/Toronto"). Auto-detect
+                from profile if None.
+
+        Both windows MUST be the same length for fair comparison.
+        """
+        client = get_client()
+        tz_name = timezone or await _resolve_timezone(client)
+        a_start = _parse_iso_date_in_tz(period_a_start, tz_name)
+        a_end = _parse_iso_date_in_tz(period_a_end, tz_name)
+        b_start = _parse_iso_date_in_tz(period_b_start, tz_name)
+        b_end = _parse_iso_date_in_tz(period_b_end, tz_name)
+
+        if (a_end - a_start) != (b_end - b_start):
+            raise ValueError(
+                "time_period_compare requires equal-length windows; "
+                f"got A={a_end - a_start}, B={b_end - b_start}."
+            )
+
+        sgvs_a = await _fetch_sgvs_between(client, a_start, a_end)
+        sgvs_b = await _fetch_sgvs_between(client, b_start, b_end)
+        period_a = _build_period_metrics(
+            period_a_label, a_start, a_end, M._sgv_to_mgdl_list(sgvs_a)
+        )
+        period_b = _build_period_metrics(
+            period_b_label, b_start, b_end, M._sgv_to_mgdl_list(sgvs_b)
+        )
+
+        # Check CI overlap
+        tir_overlap = _ci_overlap(period_a.tir_70_180_ci, period_b.tir_70_180_ci)
+        tbr_overlap = _ci_overlap(period_a.tbr_lt54_ci, period_b.tbr_lt54_ci)
+
+        delta_tir = period_b.tir_70_180_pct - period_a.tir_70_180_pct
+        delta_tbr_54 = period_b.tbr_lt54_pct - period_a.tbr_lt54_pct
+        delta_gri = period_b.gri - period_a.gri
+
+        interp = _interpret_period_compare(delta_tir, delta_tbr_54, tir_overlap, tbr_overlap)
+
+        return PeriodCompareReport(
+            period_a=period_a,
+            period_b=period_b,
+            delta_tir_pct=round(delta_tir, 2),
+            delta_tbr_lt54_pct=round(delta_tbr_54, 3),
+            delta_gri=round(delta_gri, 2),
+            delta_lbgi=round(period_b.lbgi - period_a.lbgi, 3),
+            delta_hbgi=round(period_b.hbgi - period_a.hbgi, 3),
+            delta_cv_percent=round(period_b.cv_percent - period_a.cv_percent, 2),
+            tir_ci_overlap=tir_overlap,
+            tbr_lt54_ci_overlap=tbr_overlap,
+            interpretation=interp,
+        )
+
 
 # ---------------------------------------------------------------------------
 # Helpers used by the tool implementations above
@@ -987,7 +1559,7 @@ def _interpret_isf_ratio(overall: float, by_bg_band: list[BolusBandAggregate]) -
     if 0.85 <= overall <= 1.15:
         return (
             f"AAPS Dynamic ISF is well-calibrated (overall ratio {overall:.2f}, "
-            f"within ±15% of 1.0)."
+            f"within +/-15% of 1.0)."
         )
     if overall > 1.15:
         if above and in_target and above.isf_ratio_realized_vs_effective > 1.3 and \
@@ -1093,3 +1665,221 @@ def _build_iob_observations(
             observations.append((float(sample_t), 0.0, observed_remaining_frac))
 
     return observations
+
+
+# ---------------------------------------------------------------------------
+# Section C helpers
+# ---------------------------------------------------------------------------
+
+
+async def _read_current_dynisf_adjust(client: NightscoutClient) -> int:
+    """Try to read the current DynISFAdjust value.
+
+    AAPS does NOT publish this preference to Nightscout, so we can't read it
+    from the REST API. Fallback: default to 100 (AAPS stock default). Per the
+    cysSETTINGS audit trail the actual value can be 30 (the user's current
+    setting as of 2026-05-23). For now we read from a settings cache or
+    environment variable; absent that, return 100.
+
+    Future: integrate with the Phase 2 settings-history pipeline once that
+    ships.
+    """
+    import os
+    try:
+        return int(os.environ.get("AAPS_DYNISF_ADJUST", "100"))
+    except (ValueError, TypeError):
+        return 100
+
+
+def _compute_change_window_metrics(values: list[float]) -> dict[str, float]:
+    """Compute headline metrics for a pre/post window."""
+    n = len(values)
+    if n == 0:
+        return {"tir_pct": 0.0, "tbr_lt54_pct": 0.0, "in_range_count": 0.0, "gri": 0.0}
+    in_range = sum(1 for v in values if 70 <= v <= 180)
+    below_54 = sum(1 for v in values if v < 54)
+    gri_data = M.gri(values)
+    return {
+        "tir_pct": in_range / n * 100,
+        "tbr_lt54_pct": below_54 / n * 100,
+        "in_range_count": float(in_range),
+        "gri": gri_data["gri"],
+    }
+
+
+def _two_proportion_p_value(s1: int, n1: int, s2: int, n2: int) -> float:
+    """Two-proportion z-test approximation of the p-value.
+
+    H0: p1 == p2. Returns approximate two-tailed p-value via the normal
+    distribution. Pure-stdlib implementation of the standard formula.
+    """
+    if n1 == 0 or n2 == 0:
+        return 1.0
+    p1 = s1 / n1
+    p2 = s2 / n2
+    p_pool = (s1 + s2) / (n1 + n2)
+    se = math.sqrt(p_pool * (1 - p_pool) * (1.0 / n1 + 1.0 / n2))
+    if se == 0:
+        return 1.0
+    z = abs(p1 - p2) / se
+    # Two-tailed p from z using the standard normal CDF approximation
+    p = 2 * (1 - _phi(abs(z)))
+    return max(0.0, min(1.0, p))
+
+
+def _phi(z: float) -> float:
+    """Standard normal CDF approximation (Abramowitz & Stegun 26.2.17)."""
+    if z < 0:
+        return 1 - _phi(-z)
+    # Constants
+    b1 = 0.31938153
+    b2 = -0.356563782
+    b3 = 1.781477937
+    b4 = -1.821255978
+    b5 = 1.330274429
+    t = 1.0 / (1.0 + 0.2316419 * z)
+    poly = b1 * t + b2 * t**2 + b3 * t**3 + b4 * t**4 + b5 * t**5
+    pdf = math.exp(-z * z / 2) / math.sqrt(2 * math.pi)
+    return 1 - pdf * poly
+
+
+def _bh_correct(p_values: list[float], q: float) -> list[float]:
+    """Benjamini-Hochberg FDR correction.
+
+    Returns adjusted p-values such that controlling them at q controls FDR
+    at q. Same order as input.
+    """
+    n = len(p_values)
+    if n == 0:
+        return []
+    # Sort with original indices
+    indexed = sorted(enumerate(p_values), key=lambda x: x[1])
+    adjusted = [0.0] * n
+    # Standard BH adjusted p: min(p[k]*n/k, prev_adjusted)
+    prev = 1.0
+    for rank in range(n - 1, -1, -1):
+        original_idx, p = indexed[rank]
+        adj = p * n / (rank + 1)
+        adj = min(adj, prev, 1.0)
+        adjusted[original_idx] = adj
+        prev = adj
+    return adjusted
+
+
+def _build_period_metrics(
+    label: str,
+    start: datetime,
+    end: datetime,
+    values: list[float],
+) -> PeriodMetrics:  # noqa: F821 - forward reference resolved by importer
+    """Build a PeriodMetrics record from a list of mg/dL values + window bounds."""
+    # Local import to avoid circular reference at module-load
+    from ..models import PeriodMetrics as _PM
+
+    n = len(values)
+    if n == 0:
+        return _PM(
+            label=label,
+            start_iso=start.isoformat(),
+            end_iso=end.isoformat(),
+            sample_count=0,
+            mean_mgdl=0.0,
+            mean_mmol=0.0,
+            tir_70_180_pct=0.0,
+            tir_70_180_ci=(0.0, 0.0),
+            tbr_lt54_pct=0.0,
+            tbr_lt54_ci=(0.0, 0.0),
+            tbr_lt70_pct=0.0,
+            tar_gt180_pct=0.0,
+            gri=0.0,
+            lbgi=0.0,
+            hbgi=0.0,
+            cv_percent=0.0,
+            gmi_percent=0.0,
+        )
+    in_range = sum(1 for v in values if 70 <= v <= 180)
+    below_54 = sum(1 for v in values if v < 54)
+    below_70 = sum(1 for v in values if v < 70)
+    above_180 = sum(1 for v in values if v > 180)
+    mean_bg = sum(values) / n
+    cv = M.cv_percent(values)
+    gri_data = M.gri(values)
+    lbgi, hbgi = M.lbgi_hbgi(values)
+    return _PM(
+        label=label,
+        start_iso=start.isoformat(),
+        end_iso=end.isoformat(),
+        sample_count=n,
+        mean_mgdl=round(mean_bg, 1),
+        mean_mmol=mgdl_to_mmol(mean_bg),
+        tir_70_180_pct=round(in_range / n * 100, 2),
+        tir_70_180_ci=M.wilson_ci_95(in_range, n),
+        tbr_lt54_pct=round(below_54 / n * 100, 3),
+        tbr_lt54_ci=M.wilson_ci_95(below_54, n),
+        tbr_lt70_pct=round(below_70 / n * 100, 2),
+        tar_gt180_pct=round(above_180 / n * 100, 2),
+        gri=round(gri_data["gri"], 2),
+        lbgi=round(lbgi, 3),
+        hbgi=round(hbgi, 3),
+        cv_percent=cv,
+        gmi_percent=M.gmi_percent(mean_bg),
+    )
+
+
+def _ci_overlap(ci_a: tuple[float, float], ci_b: tuple[float, float]) -> bool:
+    """Check whether two 95% CIs overlap."""
+    return not (ci_a[1] < ci_b[0] or ci_b[1] < ci_a[0])
+
+
+def _interpret_period_compare(
+    delta_tir: float,
+    delta_tbr_54: float,
+    tir_overlap: bool,
+    tbr_overlap: bool,
+) -> str:
+    """Map a pre/post delta + CI-overlap status to an interpretation string."""
+    parts = []
+    if abs(delta_tir) < 1.0:
+        parts.append("TIR change is negligible (<1 percentage point).")
+    elif delta_tir > 0:
+        parts.append(f"TIR improved by {delta_tir:+.1f} pp.")
+        if tir_overlap:
+            parts.append("CIs overlap — change not yet statistically distinguishable from noise.")
+        else:
+            parts.append("CIs do not overlap — change is statistically meaningful.")
+    else:
+        parts.append(f"TIR worsened by {delta_tir:+.1f} pp.")
+        if tir_overlap:
+            parts.append("CIs overlap — within noise range.")
+        else:
+            parts.append("CIs do not overlap — change is statistically meaningful.")
+
+    if abs(delta_tbr_54) < 0.1:
+        parts.append("TBR<54 essentially unchanged.")
+    elif delta_tbr_54 > 0:
+        parts.append(f"TBR<54 increased by {delta_tbr_54:+.2f} pp (worsening hypo exposure).")
+        if not tbr_overlap:
+            parts.append("Hypo CIs do not overlap — increase is meaningful.")
+    else:
+        parts.append(f"TBR<54 decreased by {delta_tbr_54:+.2f} pp (improvement).")
+        if not tbr_overlap:
+            parts.append("Hypo CIs do not overlap — improvement is meaningful.")
+    return " ".join(parts)
+
+
+def _parse_iso_date_in_tz(date_str: str, tz_name: str | None) -> datetime:
+    """Parse YYYY-MM-DD as local-midnight in the given timezone, return UTC datetime."""
+    if not tz_name:
+        return datetime.fromisoformat(date_str).replace(tzinfo=UTC)
+    try:
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+        try:
+            tz = ZoneInfo(tz_name)
+        except ZoneInfoNotFoundError:
+            return datetime.fromisoformat(date_str).replace(tzinfo=UTC)
+    except ImportError:
+        return datetime.fromisoformat(date_str).replace(tzinfo=UTC)
+    naive = datetime.fromisoformat(date_str)
+    local_midnight = naive.replace(tzinfo=tz)
+    return local_midnight.astimezone(UTC)
