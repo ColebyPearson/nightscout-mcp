@@ -16,6 +16,7 @@ import respx
 
 from nightscout_mcp.client import NightscoutClient
 from nightscout_mcp.config import Settings
+from nightscout_mcp.tools import aaps_history as aaps_history_tools
 from nightscout_mcp.tools import analytics as analytics_tools
 from nightscout_mcp.tools import metrics as metrics_tools
 from nightscout_mcp.tools import read as read_tools
@@ -58,6 +59,7 @@ def registry_and_client(settings: Settings) -> tuple[_ToolRegistry, NightscoutCl
     analytics_tools.register(reg, lambda: client)
     metrics_tools.register(reg, lambda: client)
     synthesis_tools.register(reg, lambda: client)
+    aaps_history_tools.register(reg, lambda: client)
     return reg, client
 
 
@@ -798,6 +800,20 @@ async def test_no_tool_response_contains_the_token(
                 period_a_end="2026-05-18",
                 period_b_start="2026-05-18",
                 period_b_end="2026-05-21",
+            ),
+            # Track 5 — AAPS history tools (graceful-empty when DB missing)
+            await reg.tools["aaps_history_status"](),
+            await reg.tools["aaps_setting_at"](
+                key="DynISFAdjust", time_iso="2026-05-24T00:00:00Z"
+            ),
+            await reg.tools["aaps_setting_history"](key="DynISFAdjust", days_back=30),
+            await reg.tools["aaps_settings_diff"](
+                from_iso="2026-05-23T00:00:00Z", to_iso="2026-05-25T00:00:00Z"
+            ),
+            await reg.tools["aaps_log_user_entries"](
+                start_iso="2026-05-23T00:00:00Z",
+                end_iso="2026-05-25T00:00:00Z",
+                event_types=["BOLUS"],
             ),
         ]
     finally:

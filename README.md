@@ -13,7 +13,7 @@ This tool reads CGM data and surfaces it to an LLM. **It is not a medical device
 
 ## What you get
 
-**36 read-only MCP tools** spanning live data, history, and analytics. The LLM can ask things like *"What's my current BG and how much insulin is on board?"* or *"Has the dawn phenomenon hit me on more than half the mornings this week?"* and get back structured answers backed by real Nightscout queries.
+**41 read-only MCP tools** spanning live data, history, and analytics. The LLM can ask things like *"What's my current BG and how much insulin is on board?"* or *"Has the dawn phenomenon hit me on more than half the mornings this week?"* and get back structured answers backed by real Nightscout queries.
 
 ### Read tools (10)
 
@@ -75,6 +75,22 @@ Higher-level tools that compose the metrics suite into actionable outputs.
 | `agp_markdown_render` | Markdown-rendered AGP with ASCII IQR-band visualization | Battelino 2019 AGP consensus |
 | `time_period_compare` | Two-window TIR / TBR<54 / GRI / LBGI / HBGI / CV / GMI side-by-side with 95% CIs and statistical-significance flagging | Wilson 1927 binomial CI |
 
+### AAPS history tools (5)
+
+Read-only access to a local SQLite store of decrypted AAPS settings snapshots (populated by the companion `aaps-history-ingest` service, which watches a Google Drive folder for AAPS encrypted exports, decrypts them with a password from the OS keyring, and stores snapshots + change events).
+
+When the ingest service is not configured, each tool returns a graceful empty result with a note explaining setup steps — these tools are optional infrastructure layered on top of the Nightscout-side tools.
+
+| Tool | Returns |
+|---|---|
+| `aaps_history_status` | DB presence, snapshot count, date range covered |
+| `aaps_setting_at` | Value of a setting at a given point in time, resolved from the most-recent prior snapshot |
+| `aaps_setting_history` | Every detected change to a single setting over a window |
+| `aaps_settings_diff` | All settings changed between two timestamps |
+| `aaps_log_user_entries` | USER ENTRY records from AAPS log archive (populated when auto-log-export Track 4 ships) |
+
+DB location resolves via the `AAPS_INGEST_DB_PATH` env var, defaulting to `C:\Repos\aaps-history-ingest\data\ingest.sqlite`.
+
 ## Example: what the LLM actually sees
 
 `insulin_sensitivity_check(days=14)` against a personal Nightscout instance returns something like:
@@ -118,7 +134,7 @@ This project takes a deliberately different slot:
 | Transport | **stdio** — no exposed network surface |
 | Auth | **Token only** — refuses `API_SECRET` (least privilege) |
 | Writes | **None** — provably safer for personal/educational use |
-| Tests | **196 passing** including a cross-tool token-leak regression |
+| Tests | **210 passing** including a cross-tool token-leak regression |
 | Default units | **mmol/L** (overridable) — every payload includes both |
 | Analytics | **Real-world ISF**, compression-low detection, recurring pattern detection |
 
@@ -180,7 +196,7 @@ Add to `claude_desktop_config.json` (macOS: `~/Library/Application Support/Claud
 }
 ```
 
-Restart Claude Desktop. The 36 tools appear under the 🔌 menu.
+Restart Claude Desktop. The 41 tools appear under the 🔌 menu.
 
 ### Claude Code
 
