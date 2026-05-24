@@ -1,6 +1,6 @@
 [project]
 name = "nightscout-mcp"
-version = "0.2.0"
+version = "0.3.0"
 description = "Model Context Protocol server for Nightscout — lets LLMs read glucose, treatments, and analytics from a personal Nightscout instance."
 readme = "README.md"
 license = { text = "MIT" }
