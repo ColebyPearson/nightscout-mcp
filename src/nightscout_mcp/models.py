@@ -920,6 +920,89 @@ class PeriodCompareReport(BaseModel):
     interpretation: str
 
 
+# --- AAPS history tools (Track 5 — reads aaps-history-ingest SQLite) -------
+
+
+class AapsHistoryStoreStatus(BaseModel):
+    """Whether the AAPS history SQLite store is reachable and populated."""
+
+    db_path: str
+    db_present: bool
+    snapshot_count: int
+    latest_snapshot_iso: str | None
+    earliest_snapshot_iso: str | None
+    latest_aaps_version: str | None
+    note: str
+
+
+class AapsSettingValue(BaseModel):
+    """Most-recent value of a setting as of a given timestamp."""
+
+    key: str
+    queried_time_iso: str
+    value: Any | None
+    found_in_snapshot: bool
+    snapshot_captured_at: str | None
+    aaps_version_at_snapshot: str | None
+    note: str
+
+
+class AapsSettingChangeEvent(BaseModel):
+    """A single change-event record for a setting."""
+
+    detected_at: str
+    snapshot_captured_at: str
+    aaps_version: str | None
+    key: str
+    change_type: str
+    previous_value: Any | None
+    new_value: Any | None
+
+
+class AapsSettingHistory(BaseModel):
+    """Timeline of all changes to a single setting."""
+
+    key: str
+    days_back: int
+    event_count: int
+    events: list[AapsSettingChangeEvent]
+    current_value: Any | None
+    current_snapshot_captured_at: str | None
+    note: str
+
+
+class AapsSettingsDiff(BaseModel):
+    """All setting changes detected in a window."""
+
+    from_iso: str
+    to_iso: str
+    change_count: int
+    changes: list[AapsSettingChangeEvent]
+    note: str
+
+
+class AapsLogUserEntry(BaseModel):
+    """One USER ENTRY row from AAPS logs."""
+
+    ts: str
+    event_type: str
+    source: str | None
+    raw_text: str | None
+    values: dict[str, Any] | None
+
+
+class AapsLogUserEntries(BaseModel):
+    """Result of a USER ENTRY log query."""
+
+    start_iso: str
+    end_iso: str
+    event_types_filter: list[str] | None
+    log_archive_available: bool
+    entry_count: int
+    entries: list[AapsLogUserEntry]
+    note: str
+
+
 # --- Helpers ----------------------------------------------------------------
 
 
