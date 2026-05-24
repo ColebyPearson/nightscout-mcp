@@ -10,6 +10,10 @@ notes/
 # Claude Code local settings (per-machine, not for the repo)
 .claude/settings.local.json
 
+# Decrypted AAPS exports — extremely sensitive, never commit
+.aaps-decrypted-temp.json
+.aaps-decrypted-*.json
+
 # Python
 __pycache__/
 *.py[cod]
