@@ -786,6 +786,140 @@ class ClinicPacket(BaseModel):
     headline_findings: list[str]
 
 
+# --- Composition / recommendation tools (PR #C) -----------------------------
+
+
+class DynIsfRecommendation(BaseModel):
+    """Recommendation output for AAPS DynISFAdjust (AF) tuning.
+
+    Decision tree per the research report's Topic 7 + claim #10 BG-curve
+    dampening signature: distinguishes uniform-AF error from curve-dampening.
+    """
+
+    current_af: int  # current DynISFAdjust value (e.g., 30)
+    recommended_af: int | None  # None = hold
+    recommendation_type: str  # 'hold', 'lower_af', 'raise_af', 'dampen_curve', 'insufficient_data'
+    overall_ratio: float
+    in_target_ratio: float | None
+    above_target_ratio: float | None
+    confidence: str  # 'low' | 'medium' | 'high'
+    sample_count: int
+    reasoning: str
+    caveat_text: str
+
+
+class TargetCheck(BaseModel):
+    """Single metric vs. its consensus target."""
+
+    metric_name: str
+    metric_value: float
+    target_description: str
+    in_target: bool
+    direction: str  # 'above_target' | 'below_target' | 'in_target' | 'unknown'
+    severity: str  # 'ok' | 'borderline' | 'over' | 'severe'
+    citation: str
+
+
+class ConsensusTargetAudit(BaseModel):
+    """Audit of patient metrics against published consensus targets.
+
+    References: Battelino 2019 (TIR / TBR / TAR / CV bands), Klonoff 2023
+    (GRI), Kovatchev 1998 (LBGI/HBGI), ISPAD 2022 (pediatric TIR).
+    """
+
+    days: int
+    checks: list[TargetCheck]
+    summary_pass_count: int
+    summary_fail_count: int
+    headline: str
+
+
+class SettingChangeAttribution(BaseModel):
+    """Single profile-change event with pre/post metric attribution."""
+
+    change_timestamp_iso: str
+    profile_name: str | None
+    percentage: int | None
+    pre_window_days: int
+    post_window_days: int
+    pre_tir_pct: float
+    post_tir_pct: float
+    delta_tir_pct: float
+    pre_tbr_lt54_pct: float
+    post_tbr_lt54_pct: float
+    delta_tbr_lt54_pct: float
+    pre_gri: float
+    post_gri: float
+    delta_gri: float
+    binomial_p_value_uncorrected: float  # Wilson approx p
+    binomial_p_value_fdr_corrected: float  # BH-corrected within this report
+    significance_band: str  # 'not_significant' | 'borderline' | 'significant'
+
+
+class SettingChangeAttributionReport(BaseModel):
+    """Settings-change-attribution scan across the window."""
+
+    window_days: int
+    change_window_pre_days: int
+    change_window_post_days: int
+    fdr_q: float
+    change_events: list[SettingChangeAttribution]
+
+
+class AgpMarkdownRender(BaseModel):
+    """Markdown-rendered AGP percentile bands with simple ASCII visualization."""
+
+    days: int
+    timezone: str | None
+    markdown_body: str
+    p50_min_mgdl: float
+    p50_max_mgdl: float
+    p50_min_hour: int
+    p50_max_hour: int
+
+
+class PeriodMetrics(BaseModel):
+    """Metric snapshot for one time period."""
+
+    label: str
+    start_iso: str
+    end_iso: str
+    sample_count: int
+    mean_mgdl: float
+    mean_mmol: float
+    tir_70_180_pct: float
+    tir_70_180_ci: tuple[float, float]
+    tbr_lt54_pct: float
+    tbr_lt54_ci: tuple[float, float]
+    tbr_lt70_pct: float
+    tar_gt180_pct: float
+    gri: float
+    lbgi: float
+    hbgi: float
+    cv_percent: float
+    gmi_percent: float
+
+
+class PeriodCompareReport(BaseModel):
+    """Side-by-side metric comparison across two windows with deltas.
+
+    Designed for "did the setting change I made on date X actually help?"
+    style outcome verification with proper statistical framing.
+    """
+
+    period_a: PeriodMetrics
+    period_b: PeriodMetrics
+    delta_tir_pct: float
+    delta_tbr_lt54_pct: float
+    delta_gri: float
+    delta_lbgi: float
+    delta_hbgi: float
+    delta_cv_percent: float
+    tir_ci_overlap: bool  # true = CIs overlap, so change is NOT statistically distinguishable
+    tbr_lt54_ci_overlap: bool
+    interpretation: str
+
+
 # --- Helpers ----------------------------------------------------------------
 
 

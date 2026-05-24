@@ -788,6 +788,17 @@ async def test_no_tool_response_contains_the_token(
             await reg.tools["change_points_tdd"](days=14),
             await reg.tools["dia_fit_estimate"](days=7),
             await reg.tools["clinic_packet"](days=7),
+            # Section C — composition tools
+            await reg.tools["dynisf_adjustment_recommender"](days=7),
+            await reg.tools["consensus_target_audit"](days=7),
+            await reg.tools["settings_change_attribution"](days=14, pre_post_days=3),
+            await reg.tools["agp_markdown_render"](days=7),
+            await reg.tools["time_period_compare"](
+                period_a_start="2026-05-15",
+                period_a_end="2026-05-18",
+                period_b_start="2026-05-18",
+                period_b_end="2026-05-21",
+            ),
         ]
     finally:
         await client.aclose()

@@ -13,7 +13,7 @@ This tool reads CGM data and surfaces it to an LLM. **It is not a medical device
 
 ## What you get
 
-**31 read-only MCP tools** spanning live data, history, and analytics. The LLM can ask things like *"What's my current BG and how much insulin is on board?"* or *"Has the dawn phenomenon hit me on more than half the mornings this week?"* and get back structured answers backed by real Nightscout queries.
+**36 read-only MCP tools** spanning live data, history, and analytics. The LLM can ask things like *"What's my current BG and how much insulin is on board?"* or *"Has the dawn phenomenon hit me on more than half the mornings this week?"* and get back structured answers backed by real Nightscout queries.
 
 ### Read tools (10)
 
@@ -63,6 +63,18 @@ Canonical CGM metrics from the clinical literature, computed from existing Night
 | `dia_fit_estimate` | Exploratory fit of AAPS exponential IOB curve to observed bolus residuals → suggested DIA + peak | oref0 exponential / AAPS Oref |
 | `clinic_packet` | Composite 30-day markdown report (TIR + GRI + LBGI/HBGI + per-meal-period + change-points) ready to share with endo team | |
 
+### Composition tools (5)
+
+Higher-level tools that compose the metrics suite into actionable outputs.
+
+| Tool | Returns | Reference |
+|---|---|---|
+| `dynisf_adjustment_recommender` | Recommends Dynamic ISF Adjustment Factor based on observed per-band ISF residuals. Distinguishes BG-curve dampening from uniform AF error per the deep-research decision tree. | Deep research report 2026-05-24 Key Finding #1 |
+| `consensus_target_audit` | One-shot pass/fail audit of patient metrics vs. Battelino 2019 / ISPAD 2022 / Klonoff 2023 / Kovatchev thresholds | Battelino 2019, ISPAD 2022 |
+| `settings_change_attribution` | For each profile-switch event in window: pre-vs-post TIR / TBR / GRI with Benjamini-Hochberg FDR correction across changes | BH FDR (Benjamini & Hochberg 1995) |
+| `agp_markdown_render` | Markdown-rendered AGP with ASCII IQR-band visualization | Battelino 2019 AGP consensus |
+| `time_period_compare` | Two-window TIR / TBR<54 / GRI / LBGI / HBGI / CV / GMI side-by-side with 95% CIs and statistical-significance flagging | Wilson 1927 binomial CI |
+
 ## Example: what the LLM actually sees
 
 `insulin_sensitivity_check(days=14)` against a personal Nightscout instance returns something like:
@@ -106,7 +118,7 @@ This project takes a deliberately different slot:
 | Transport | **stdio** — no exposed network surface |
 | Auth | **Token only** — refuses `API_SECRET` (least privilege) |
 | Writes | **None** — provably safer for personal/educational use |
-| Tests | **175 passing** including a cross-tool token-leak regression |
+| Tests | **196 passing** including a cross-tool token-leak regression |
 | Default units | **mmol/L** (overridable) — every payload includes both |
 | Analytics | **Real-world ISF**, compression-low detection, recurring pattern detection |
 
@@ -168,7 +180,7 @@ Add to `claude_desktop_config.json` (macOS: `~/Library/Application Support/Claud
 }
 ```
 
-Restart Claude Desktop. The 31 tools appear under the 🔌 menu.
+Restart Claude Desktop. The 36 tools appear under the 🔌 menu.
 
 ### Claude Code
 
