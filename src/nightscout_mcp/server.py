@@ -17,6 +17,7 @@ from .client import NightscoutClient
 from .config import Settings, load_settings
 from .logging_setup import setup_logging
 from .tools import analytics as analytics_tools
+from .tools import metrics as metrics_tools
 from .tools import read as read_tools
 from .tools import synthesis as synthesis_tools
 
@@ -40,6 +41,7 @@ def _get_client() -> NightscoutClient:
 mcp = FastMCP("nightscout-mcp")
 read_tools.register(mcp, _get_client)
 analytics_tools.register(mcp, _get_client)
+metrics_tools.register(mcp, _get_client)
 synthesis_tools.register(mcp, _get_client)
 
 

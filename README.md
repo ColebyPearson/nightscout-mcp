@@ -13,9 +13,9 @@ This tool reads CGM data and surfaces it to an LLM. **It is not a medical device
 
 ## What you get
 
-**16 read-only MCP tools** spanning live data, history, and analytics. The LLM can ask things like *"What's my current BG and how much insulin is on board?"* or *"Has the dawn phenomenon hit me on more than half the mornings this week?"* and get back structured answers backed by real Nightscout queries.
+**31 read-only MCP tools** spanning live data, history, and analytics. The LLM can ask things like *"What's my current BG and how much insulin is on board?"* or *"Has the dawn phenomenon hit me on more than half the mornings this week?"* and get back structured answers backed by real Nightscout queries.
 
-### Read tools (9)
+### Read tools (10)
 
 | Tool | Returns |
 |---|---|
@@ -30,7 +30,7 @@ This tool reads CGM data and surfaces it to an LLM. **It is not a medical device
 | `get_server_status` | Nightscout version, status, configured units |
 | `search_treatments` | Free-form substring across notes / event types |
 
-### Analytics tools (7)
+### Analytics tools (10)
 
 | Tool | Returns |
 |---|---|
@@ -40,7 +40,28 @@ This tool reads CGM data and surfaces it to an LLM. **It is not a medical device
 | `overnight_analysis` | Drift / min/max / time-below / dawn rise / flatness |
 | `detect_patterns` | Recurring overnight lows, dawn phenomenon, post-meal spikes |
 | `insulin_sensitivity_check` | **Real-world ISF derived from correction-bolus outcomes** + comparison to profile |
+| `effective_isf_check` | Real-world ISF compared against AAPS Dynamic ISF (per-cycle `variable_sens`), stratified by pre-bolus BG band |
+| `carb_ratio_check` | Real-world CR derived from meal-bolus outcomes + comparison to profile |
+| `glucose_at_time` | Single point-in-time SGV with ±N-min tolerance |
 | `compression_low_analysis` | Suspected sensor-compression artifacts (false lows) |
+
+### Research-grade clinical metrics (11)
+
+Canonical CGM metrics from the clinical literature, computed from existing Nightscout data. Added per a 2026-05-24 deep research review of pediatric closed-loop T1D analytics. All formulas cited; references in module docstrings.
+
+| Tool | Returns | Reference |
+|---|---|---|
+| `glycemia_risk_index` | GRI + Hypo / Hyper component decomposition | Klonoff *JDST* 2023;17:1226 |
+| `bg_risk_indices` | LBGI / HBGI / ADRR with risk bands | Kovatchev *Diabetes Care* 1998;21:1870 + 2006;29:2433 |
+| `glucose_variability_metrics` | MAGE, MODD, J-index, M-value, GVP, CONGA-{1h,2h,4h}, COGI, CV | Service 1970, Molnar 1972, Schlichtkrull 1965, McDonnell 2005, Peyser 2018, Leelarathna 2020 |
+| `time_in_range_with_ci` | TIR / TBR / TAR with Wilson binomial 95 % CIs per band | Battelino *Diabetes Care* 2019;42:1593 |
+| `per_meal_period_tir` | TIR by breakfast / lunch / dinner / overnight / afternoon / evening | (composition) |
+| `ambulatory_glucose_profile` | AGP-style 5/25/50/75/95th percentile bands by hour-of-day | Battelino 2019 AGP consensus |
+| `bolus_event_residuals` | Per-bolus realized-vs-AAPS-predicted ISF, stratified by BG band + time-of-day | (composition of the above + devicestatus) |
+| `change_points_bg` | Windowed mean-shift change-point detection on hourly mean BG, annotated with profile changes | Page 1954 (CUSUM family) |
+| `change_points_tdd` | Same on daily total daily dose (catches puberty/illness/site shifts) | |
+| `dia_fit_estimate` | Exploratory fit of AAPS exponential IOB curve to observed bolus residuals → suggested DIA + peak | oref0 exponential / AAPS Oref |
+| `clinic_packet` | Composite 30-day markdown report (TIR + GRI + LBGI/HBGI + per-meal-period + change-points) ready to share with endo team | |
 
 ## Example: what the LLM actually sees
 
@@ -85,7 +106,7 @@ This project takes a deliberately different slot:
 | Transport | **stdio** — no exposed network surface |
 | Auth | **Token only** — refuses `API_SECRET` (least privilege) |
 | Writes | **None** — provably safer for personal/educational use |
-| Tests | **75 passing** including a cross-tool token-leak regression |
+| Tests | **175 passing** including a cross-tool token-leak regression |
 | Default units | **mmol/L** (overridable) — every payload includes both |
 | Analytics | **Real-world ISF**, compression-low detection, recurring pattern detection |
 
@@ -147,7 +168,7 @@ Add to `claude_desktop_config.json` (macOS: `~/Library/Application Support/Claud
 }
 ```
 
-Restart Claude Desktop. The 16 tools appear under the 🔌 menu.
+Restart Claude Desktop. The 31 tools appear under the 🔌 menu.
 
 ### Claude Code
 

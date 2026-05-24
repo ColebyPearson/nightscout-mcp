@@ -552,6 +552,240 @@ class ServerStatus(BaseModel):
     api_enabled: bool | None = None
 
 
+# --- Research-driven metrics (Klonoff 2023, Kovatchev 1998, Battelino 2019) -
+
+
+class GlycemiaRiskIndex(BaseModel):
+    """GRI per Klonoff JDST 2023;17:1226.
+
+    Total + component decomposition + per-band CGM percentages.
+    """
+
+    gri: float
+    gri_hypo_component: float
+    gri_hyper_component: float
+    pct_very_low_lt54: float
+    pct_low_54_69: float
+    pct_in_target_70_180: float
+    pct_high_181_250: float
+    pct_very_high_gt250: float
+    sample_count: int
+    days: int
+
+
+class BgRiskIndices(BaseModel):
+    """LBGI / HBGI / ADRR per Kovatchev Diabetes Care 1998;21:1870 + 2006;29:2433.
+
+    Bands: 'low' / 'moderate' / 'high' / 'very_high'.
+    """
+
+    lbgi: float
+    hbgi: float
+    adrr: float
+    lbgi_band: str
+    hbgi_band: str
+    sample_count: int
+    days: int
+
+
+class GlucoseVariability(BaseModel):
+    """Variability metrics not covered by basic CV/GMI.
+
+    All except cv_percent are derived from clinical research formulas. None
+    has been pediatric-validated to the same degree as TIR — treat as
+    directional indicators alongside TIR / TBR<54.
+    """
+
+    cv_percent: float
+    mage: float
+    modd: float
+    j_index: float
+    m_value: float
+    gvp: float
+    conga_1h: float
+    conga_2h: float
+    conga_4h: float
+    cogi: float
+    sample_count: int
+    days: int
+
+
+class TirBands(BaseModel):
+    """Time-in-range bands with binomial Wilson 95% CIs for each percentage."""
+
+    pct_very_low_lt54: float
+    pct_very_low_lt54_ci: tuple[float, float]
+    pct_low_54_69: float
+    pct_low_54_69_ci: tuple[float, float]
+    pct_in_target_70_180: float
+    pct_in_target_70_180_ci: tuple[float, float]
+    pct_high_181_250: float
+    pct_high_181_250_ci: tuple[float, float]
+    pct_very_high_gt250: float
+    pct_very_high_gt250_ci: tuple[float, float]
+    pct_tbr_lt70_combined: float
+    pct_tar_gt180_combined: float
+    sample_count: int
+
+
+class TirWithCI(BaseModel):
+    """Time-in-range report with binomial confidence intervals.
+
+    Wraps TirBands with the analysis window metadata.
+    """
+
+    days: int
+    bands: TirBands
+    cv_percent_target_36: bool  # true if CV ≤ 36%
+    cv_percent_value: float
+
+
+class MealPeriodTir(BaseModel):
+    """TIR broken out by meal period (breakfast/lunch/etc.)."""
+
+    period_name: str
+    hour_start: int
+    hour_end: int
+    sample_count: int
+    mean_mgdl: float
+    mean_mmol: float
+    pct_in_target_70_180: float
+    pct_tbr_lt70: float
+    pct_tar_gt180: float
+
+
+class MealPeriodReport(BaseModel):
+    """Per-meal-period TIR breakdown across the analysis window."""
+
+    days: int
+    timezone: str | None
+    periods: list[MealPeriodTir]
+
+
+class AgpHourPoint(BaseModel):
+    """Single hour-of-day AGP percentile band."""
+
+    hour: int
+    sample_count: int
+    p05_mgdl: float
+    p25_mgdl: float
+    p50_mgdl: float
+    p75_mgdl: float
+    p95_mgdl: float
+    p05_mmol: float
+    p25_mmol: float
+    p50_mmol: float
+    p75_mmol: float
+    p95_mmol: float
+
+
+class AmbulatoryGlucoseProfile(BaseModel):
+    """AGP-style 5/25/50/75/95th percentile bands by hour-of-day.
+
+    Reference: Battelino 2019 *Diabetes Care* 42:1593 AGP consensus.
+    """
+
+    days: int
+    timezone: str | None
+    hours: list[AgpHourPoint]
+
+
+class ChangePoint(BaseModel):
+    """A detected change-point in a time series."""
+
+    timestamp_iso: str
+    index: int
+    direction: str  # "up" | "down"
+    magnitude: float
+    cumsum: float
+
+
+class ChangePointReport(BaseModel):
+    """Change-point detection result over a signal."""
+
+    signal: str  # "hourly_mean_bg" | "daily_tdd"
+    method: str  # "cusum"
+    threshold_sigma: float
+    days: int
+    sample_count: int
+    change_points: list[ChangePoint]
+    profile_change_events: list[str]  # ISO timestamps of profile changes in window
+
+
+class BolusEvent(BaseModel):
+    """A single bolus with rich context: pre-BG, IOB, COB, AAPS prediction, realized outcome.
+
+    Built by the bolus_event_residuals tool. Used as input for per-band
+    aggregation and the DIA fitter.
+    """
+
+    timestamp_iso: str
+    insulin_units: float
+    pre_bg_mgdl: float | None
+    pre_bg_mmol: float | None
+    iob_at_bolus: float | None
+    cob_at_bolus: float | None
+    aaps_predicted_eventual_bg_mgdl: float | None
+    aaps_effective_isf_mgdl_per_u: float | None
+    realized_5h_min_bg_mgdl: float | None
+    realized_5h_drop_mgdl: float | None  # pre_bg - realized_5h_min
+    realized_isf_mgdl_per_u: float | None  # drop / units
+    meal_or_correction: str  # "meal" | "correction" | "unknown"
+    time_band: str  # "overnight" | "morning" | "afternoon" | "evening"
+    bg_band: str  # "below_70" | "70_100" | "100_140" | "140_180" | "180_250" | "over_250"
+
+
+class BolusBandAggregate(BaseModel):
+    """Aggregated stats for one bolus band (BG or time)."""
+
+    band_name: str
+    sample_count: int
+    mean_insulin_units: float
+    mean_pre_bg_mgdl: float
+    mean_realized_drop_mgdl: float
+    mean_aaps_effective_isf: float
+    mean_realized_isf: float
+    isf_ratio_realized_vs_effective: float
+
+
+class BolusEventResidualsReport(BaseModel):
+    """Per-bolus residuals with per-BG-band and per-time-band breakdowns."""
+
+    days: int
+    total_events: int
+    events_with_aaps_isf_match: int
+    aggregates_by_bg_band: list[BolusBandAggregate]
+    aggregates_by_time_band: list[BolusBandAggregate]
+    overall_ratio: float
+    interpretation: str
+
+
+class DiaFitResult(BaseModel):
+    """Output of the exploratory DIA / peak-time fitter."""
+
+    sample_count: int
+    best_dia_hours: float
+    best_peak_min: float
+    rmse: float
+    profile_dia_hours: float
+    recommendation_text: str
+    caveat_text: str
+
+
+class ClinicPacket(BaseModel):
+    """Composite 30-day clinic-ready report.
+
+    Contents are rendered as markdown for direct paste into a clinic note.
+    """
+
+    days: int
+    generated_at: str
+    period_start_iso: str
+    period_end_iso: str
+    markdown_body: str
+    headline_findings: list[str]
+
+
 # --- Helpers ----------------------------------------------------------------
 
 

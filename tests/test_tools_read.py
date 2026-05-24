@@ -17,6 +17,7 @@ import respx
 from nightscout_mcp.client import NightscoutClient
 from nightscout_mcp.config import Settings
 from nightscout_mcp.tools import analytics as analytics_tools
+from nightscout_mcp.tools import metrics as metrics_tools
 from nightscout_mcp.tools import read as read_tools
 from nightscout_mcp.tools import synthesis as synthesis_tools
 
@@ -55,6 +56,7 @@ def registry_and_client(settings: Settings) -> tuple[_ToolRegistry, NightscoutCl
     reg = _ToolRegistry()
     read_tools.register(reg, lambda: client)
     analytics_tools.register(reg, lambda: client)
+    metrics_tools.register(reg, lambda: client)
     synthesis_tools.register(reg, lambda: client)
     return reg, client
 
@@ -774,6 +776,18 @@ async def test_no_tool_response_contains_the_token(
             await reg.tools["effective_isf_check"](days=1),
             await reg.tools["daily_synthesis"](days_back=1),
             await reg.tools["health_check"](),
+            # PR #1-6 — research-driven metrics tools (token-leak coverage)
+            await reg.tools["glycemia_risk_index"](days=1),
+            await reg.tools["bg_risk_indices"](days=1),
+            await reg.tools["glucose_variability_metrics"](days=1),
+            await reg.tools["time_in_range_with_ci"](days=1),
+            await reg.tools["per_meal_period_tir"](days=1),
+            await reg.tools["ambulatory_glucose_profile"](days=1),
+            await reg.tools["bolus_event_residuals"](days=1),
+            await reg.tools["change_points_bg"](days=7),
+            await reg.tools["change_points_tdd"](days=14),
+            await reg.tools["dia_fit_estimate"](days=7),
+            await reg.tools["clinic_packet"](days=7),
         ]
     finally:
         await client.aclose()
