@@ -21,6 +21,8 @@ from .models import (
     DailyReport,
     DetectedPatterns,
     EffectiveIsfDerivation,
+    HypoEpisode,
+    HypoEpisodeReport,
     IsfBandSample,
     IsfDerivation,
     MealAnalysis,
@@ -1020,6 +1022,120 @@ def carb_ratio_check(
         avg_end_minus_pre_mgdl=round(avg_residual, 1),
         confidence=confidence,
         recommendation=" ".join(parts),
+    )
+
+
+# Consensus hypoglycemia event definition (Battelino Diabetes Care 2019;42:1593
+# / ATTD): onset = BG <70 mg/dL for >=15 min; offset = >=15 min at >=70.
+HYPO_THRESHOLD_MGDL = 70
+HYPO_LEVEL2_MGDL = 54
+HYPO_MIN_DURATION_MIN = 15
+HYPO_RECOVERY_MIN = 15  # >=15 min >=70 ends an event; shorter blips don't split it
+HYPO_RESCUE_GRACE_MIN = 15  # carb logged within this of the event = rescue
+
+
+def hypo_episodes(
+    days: int,
+    sgvs: list[Sgv],
+    treatments: list[Treatment] | None = None,
+    tz_offset_hours: float = 0.0,
+) -> HypoEpisodeReport:
+    """Detect consensus hypoglycemic events from CGM.
+
+    An event is a run of BG <70 mg/dL lasting >=15 min; a rise to >=70 for
+    <15 min does not end it (blips are merged). Level 2 (<54) is set by the
+    event nadir. `nocturnal` is judged in local time via `tz_offset_hours`;
+    `rescue_carbs` flags a carb treatment logged during the event.
+    """
+    pairs = sorted(
+        ((parse_iso_to_utc(s.date_iso), s.sgv_mgdl) for s in sgvs if s.sgv_mgdl > 0),
+        key=lambda p: p[0],
+    )
+    reading_count = len(pairs)
+    expected = max(1, days) * 288  # 5-min cadence
+    pct_active = round(min(100.0, reading_count / expected * 100), 1)
+
+    # Raw contiguous below-threshold segments (consecutive readings all <70).
+    raw: list[list[tuple[datetime, int]]] = []
+    current: list[tuple[datetime, int]] = []
+    for ts, v in pairs:
+        if v < HYPO_THRESHOLD_MGDL:
+            current.append((ts, v))
+        elif current:
+            raw.append(current)
+            current = []
+    if current:
+        raw.append(current)
+
+    # Merge segments separated by <15 min above 70 (brief excursion mid-event).
+    merged: list[list[tuple[datetime, int]]] = []
+    for seg in raw:
+        if merged:
+            gap_min = (seg[0][0] - merged[-1][-1][0]).total_seconds() / 60
+            if gap_min < HYPO_RECOVERY_MIN:
+                merged[-1].extend(seg)
+                continue
+        merged.append(list(seg))
+
+    carb_txs = [parse_iso_to_utc(t.created_at) for t in (treatments or []) if t.carbs and t.carbs > 0]
+
+    episodes: list[HypoEpisode] = []
+    for seg in merged:
+        start_ts, end_ts = seg[0][0], seg[-1][0]
+        duration = int((end_ts - start_ts).total_seconds() / 60)
+        if duration < HYPO_MIN_DURATION_MIN:
+            continue  # too brief to be a consensus event
+        nadir = min(v for _, v in seg)
+        nadir_ts = next(ts for ts, v in seg if v == nadir)
+        local_hour, _ = _local_hour_minute(nadir_ts, tz_offset_hours)
+        grace = timedelta(minutes=HYPO_RESCUE_GRACE_MIN)
+        rescue = any(start_ts - grace <= c <= end_ts + grace for c in carb_txs)
+        episodes.append(
+            HypoEpisode(
+                start_iso=seg[0][0].strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                end_iso=end_ts.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                duration_minutes=duration,
+                nadir_mgdl=nadir,
+                nadir_mmol=mgdl_to_mmol(nadir),
+                level=2 if nadir < HYPO_LEVEL2_MGDL else 1,
+                nocturnal=local_hour < 6,
+                rescue_carbs=rescue,
+            )
+        )
+
+    level1 = sum(1 for e in episodes if e.level == 1)
+    level2 = sum(1 for e in episodes if e.level == 2)
+    nocturnal = sum(1 for e in episodes if e.nocturnal)
+    with_rescue = sum(1 for e in episodes if e.rescue_carbs)
+    total_below = sum(e.duration_minutes for e in episodes)
+    mean_dur = round(statistics.fmean([e.duration_minutes for e in episodes]), 1) if episodes else 0.0
+    per_week = round(len(episodes) / max(1, days) * 7, 1)
+
+    if not episodes:
+        summary = f"No consensus hypoglycemic events (>=15 min <70 mg/dL) in {days} days."
+    else:
+        summary = (
+            f"{len(episodes)} hypo events in {days} days ({per_week}/week): "
+            f"{level2} level-2 (<54), {level1} level-1 (54-69), {nocturnal} nocturnal. "
+            f"Mean duration {mean_dur} min."
+        )
+        if pct_active < 70:
+            summary += f" NOTE: only {pct_active}% CGM-active — event counts likely undercount."
+
+    return HypoEpisodeReport(
+        days_analyzed=days,
+        reading_count=reading_count,
+        pct_cgm_active=pct_active,
+        total_episodes=len(episodes),
+        level1_episodes=level1,
+        level2_episodes=level2,
+        nocturnal_episodes=nocturnal,
+        episodes_with_rescue_carbs=with_rescue,
+        episodes_per_week=per_week,
+        mean_duration_minutes=mean_dur,
+        total_time_below_70_minutes=total_below,
+        episodes=episodes,
+        summary=summary,
     )
 
 

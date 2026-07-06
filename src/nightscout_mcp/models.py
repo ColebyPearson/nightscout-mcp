@@ -354,6 +354,43 @@ class DetectedPatterns(BaseModel):
     patterns: list[Pattern]
 
 
+class HypoEpisode(BaseModel):
+    """A single consensus hypoglycemic event (Battelino 2019 / ATTD).
+
+    An event starts at the first CGM reading <70 mg/dL and, per consensus,
+    only counts once BG has stayed <70 for >=15 min; it ends after >=15 min
+    at or above 70. Level is set by the nadir: level 1 = 54-69 mg/dL,
+    level 2 (clinically significant) = <54.
+    """
+
+    start_iso: str
+    end_iso: str
+    duration_minutes: int
+    nadir_mgdl: int
+    nadir_mmol: float
+    level: int  # 1 (54-69) or 2 (<54)
+    nocturnal: bool  # nadir fell in local 00:00-06:00
+    rescue_carbs: bool  # a carb treatment logged during the event (+/- grace)
+
+
+class HypoEpisodeReport(BaseModel):
+    """Output of hypoglycemia_episodes — consensus event counts + list."""
+
+    days_analyzed: int
+    reading_count: int
+    pct_cgm_active: float  # % of expected 5-min readings present in the window
+    total_episodes: int
+    level1_episodes: int
+    level2_episodes: int
+    nocturnal_episodes: int
+    episodes_with_rescue_carbs: int
+    episodes_per_week: float
+    mean_duration_minutes: float
+    total_time_below_70_minutes: int
+    episodes: list[HypoEpisode]
+    summary: str
+
+
 class IsfDerivation(BaseModel):
     """Real-world ISF derived from correction-bolus outcomes."""
 

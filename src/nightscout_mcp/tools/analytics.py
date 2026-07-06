@@ -28,6 +28,9 @@ from ..analytics import (
     effective_isf_check as _effective_isf_check,
 )
 from ..analytics import (
+    hypo_episodes as _hypo_episodes,
+)
+from ..analytics import (
     insulin_sensitivity_check as _isf_check,
 )
 from ..analytics import (
@@ -40,6 +43,7 @@ from ..models import (
     DailyReport,
     DetectedPatterns,
     EffectiveIsfDerivation,
+    HypoEpisodeReport,
     IsfDerivation,
     MealAnalysis,
     OvernightAnalysis,
@@ -423,6 +427,31 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
             grouped.setdefault(date_key, []).append(s)
         daily_groups = sorted(grouped.items())
         return _detect_patterns(days, daily_groups, tz_offset_hours=offset)
+
+    @mcp.tool()
+    async def hypoglycemia_episodes(days: int = 14, timezone: str | None = None) -> HypoEpisodeReport:
+        """Detect consensus hypoglycemic EVENTS (not just % time below range).
+
+        Applies the Battelino 2019 / ATTD definition: an event is BG <70 mg/dL
+        for >=15 min; level 2 (clinically significant) is a nadir <54. Reports
+        per-event start/end/duration/nadir/level, whether it was nocturnal
+        (local 00:00-06:00), and whether a rescue carb was logged during it —
+        plus summary counts and % CGM-active so an under-sampled window is
+        flagged rather than silently undercounting.
+
+        Args:
+            days: lookback window. Default 14, max 90.
+            timezone: Olson zone name; if None, auto-detect from profile.
+        """
+        client = get_client()
+        days = max(1, min(days, 90))
+        tz_name = timezone or await _resolve_timezone(client)
+        end = datetime.now(UTC)
+        start = end - timedelta(days=days)
+        offset = _tz_offset_hours(tz_name, start)
+        sgvs = await _fetch_sgvs_between(client, start, end)
+        txs = await _fetch_treatments_between(client, start, end)
+        return _hypo_episodes(days, sgvs, txs, tz_offset_hours=offset)
 
     @mcp.tool()
     async def insulin_sensitivity_check(days: int = 14) -> IsfDerivation:

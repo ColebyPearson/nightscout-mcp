@@ -39,6 +39,7 @@ This tool reads CGM data and surfaces it to an LLM. **It is not a medical device
 | `analyze_meal` | Pre-meal BG / peak / time-to-peak / rise / recovery / notes |
 | `overnight_analysis` | Drift / min/max / time-below / dawn rise / flatness |
 | `detect_patterns` | Recurring overnight lows, dawn phenomenon, post-meal spikes |
+| `hypoglycemia_episodes` | **Consensus hypo events** (Battelino 2019/ATTD ≥15-min <70): per-event duration / nadir / level 1–2 / nocturnal / rescue-carb linkage + % CGM-active |
 | `insulin_sensitivity_check` | **Real-world ISF derived from correction-bolus outcomes** + comparison to profile |
 | `effective_isf_check` | Real-world ISF compared against AAPS Dynamic ISF (per-cycle `variable_sens`), stratified by pre-bolus BG band |
 | `carb_ratio_check` | Real-world CR derived from meal-bolus outcomes + comparison to profile |
