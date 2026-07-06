@@ -164,3 +164,36 @@ def test_build_period_metrics_basic():
     assert isinstance(pm.tir_70_180_ci, tuple)
     assert len(pm.tir_70_180_ci) == 2
     assert pm.tir_70_180_ci[0] < pm.tir_70_180_pct < pm.tir_70_180_ci[1] + 0.01
+
+
+# --- Age-banded consensus target profiles ------------------------------------
+
+
+def test_target_populations_have_expected_consensus_thresholds():
+    """Guard the clinically-critical constants against typos (Battelino 2019)."""
+    from nightscout_mcp.tools.metrics import TARGET_POPULATIONS
+
+    std = TARGET_POPULATIONS["standard"]
+    assert (std["tir_low"], std["tir_high"]) == (70, 180)
+    assert std["tir_min_pct"] == 70.0
+    assert std["tbr_low_max_pct"] == 4.0  # <70 <4%
+    assert std["tbr_vlow_max_pct"] == 1.0  # <54 <1%
+
+    older = TARGET_POPULATIONS["older_high_risk"]
+    assert older["tir_min_pct"] == 50.0  # relaxed TIR
+    assert older["tbr_low_max_pct"] == 1.0  # stricter on lows
+
+    preg = TARGET_POPULATIONS["pregnancy_t1d"]
+    assert (preg["tir_low"], preg["tir_high"]) == (63, 140)  # pregnancy range
+    assert preg["tir_min_pct"] == 70.0
+    assert preg["tbr_low_cut"] == 63
+    assert preg["tar_vhigh_cut"] is None  # no separate very-high band
+
+
+def test_all_populations_keep_vlow_at_1pct():
+    """Every population must hold TBR<54 to <1% — the non-negotiable safety floor."""
+    from nightscout_mcp.tools.metrics import TARGET_POPULATIONS
+
+    for name, p in TARGET_POPULATIONS.items():
+        assert p["tbr_vlow_cut"] == 54, name
+        assert p["tbr_vlow_max_pct"] == 1.0, name

@@ -117,6 +117,56 @@ def _safe_get(d: dict[str, Any], path: str, default: Any = None) -> Any:
     return cur
 
 
+# Consensus glycemic-target profiles by population (Battelino Diabetes Care
+# 2019;42:1593 Table + ISPAD 2022). TIR range and the TBR/TAR cut-points and
+# limits vary by population; the risk indices (GRI/LBGI/HBGI/CV/GMI) do not.
+# `tar_vhigh_cut=None` means that population has no separate very-high band.
+TARGET_POPULATIONS: dict[str, dict[str, Any]] = {
+    "standard": {
+        "label": "T1D / T2D, including children & adolescents",
+        "tir_low": 70,
+        "tir_high": 180,
+        "tir_min_pct": 70.0,
+        "tbr_low_cut": 70,
+        "tbr_low_max_pct": 4.0,
+        "tbr_vlow_cut": 54,
+        "tbr_vlow_max_pct": 1.0,
+        "tar_vhigh_cut": 250,
+        "tar_high_max_pct": 25.0,
+        "tar_vhigh_max_pct": 5.0,
+        "citation": "Battelino 2019; ISPAD 2022",
+    },
+    "older_high_risk": {
+        "label": "older / high-risk (hypoglycemia-avoidant)",
+        "tir_low": 70,
+        "tir_high": 180,
+        "tir_min_pct": 50.0,
+        "tbr_low_cut": 70,
+        "tbr_low_max_pct": 1.0,  # stricter on lows
+        "tbr_vlow_cut": 54,
+        "tbr_vlow_max_pct": 1.0,
+        "tar_vhigh_cut": 250,
+        "tar_high_max_pct": 50.0,
+        "tar_vhigh_max_pct": 10.0,
+        "citation": "Battelino 2019 (older / high-risk)",
+    },
+    "pregnancy_t1d": {
+        "label": "pregnancy (T1D)",
+        "tir_low": 63,
+        "tir_high": 140,
+        "tir_min_pct": 70.0,
+        "tbr_low_cut": 63,
+        "tbr_low_max_pct": 4.0,
+        "tbr_vlow_cut": 54,
+        "tbr_vlow_max_pct": 1.0,
+        "tar_vhigh_cut": None,
+        "tar_high_max_pct": 25.0,
+        "tar_vhigh_max_pct": None,
+        "citation": "Battelino 2019 (pregnancy T1D)",
+    },
+}
+
+
 def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
     """Attach the research-metrics tools to a FastMCP instance."""
 
@@ -923,17 +973,25 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
         )
 
     @mcp.tool()
-    async def consensus_target_audit(days: int = 14) -> ConsensusTargetAudit:
+    async def consensus_target_audit(days: int = 14, population: str = "standard") -> ConsensusTargetAudit:
         """One-shot audit of metrics vs. published consensus targets.
 
         Compares the patient's TIR, TBR<54, TAR>180, CV, GRI, LBGI, HBGI, and
         GMI against the Battelino 2019, ISPAD 2022, Klonoff 2023, and Kovatchev
         thresholds. Returns a per-metric pass/fail table + summary.
 
+        The TIR range and TBR/TAR limits are population-specific:
+          - `standard` (default): T1D/T2D incl. children/adolescents —
+            TIR 70-180 >70%, TBR<70 <4%, TBR<54 <1%.
+          - `older_high_risk`: TIR 70-180 >50%, TBR<70 <1% (hypo-avoidant).
+          - `pregnancy_t1d`: TIR **63-140** >70%, TBR<63 <4%, TBR<54 <1%.
+        Risk indices (GRI/LBGI/HBGI/CV/GMI) are population-independent.
+
         Useful for "in 30 seconds, which of my numbers are off-target?"
         """
         client = get_client()
         days = max(7, min(days, 90))
+        profile = TARGET_POPULATIONS.get(population) or TARGET_POPULATIONS["standard"]
         start, end = _window_for_days(days)
         sgvs = await _fetch_sgvs_between(client, start, end)
         values = M._sgv_to_mgdl_list(sgvs)
@@ -949,12 +1007,15 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
                 headline="No CGM data in window — cannot audit.",
             )
 
-        # Compute every metric
-        tir = sum(1 for v in values if 70 <= v <= 180) / n * 100
-        tbr_54 = sum(1 for v in values if v < 54) / n * 100
-        tbr_70 = sum(1 for v in values if v < 70) / n * 100
-        tar_180 = sum(1 for v in values if v > 180) / n * 100
-        tar_250 = sum(1 for v in values if v > 250) / n * 100
+        # Compute metrics against the selected population's TIR range.
+        tl, th = profile["tir_low"], profile["tir_high"]
+        tbr_low_cut, tbr_vlow_cut = profile["tbr_low_cut"], profile["tbr_vlow_cut"]
+        tar_vhigh_cut = profile["tar_vhigh_cut"]
+        tir = sum(1 for v in values if tl <= v <= th) / n * 100
+        tbr_vlow = sum(1 for v in values if v < tbr_vlow_cut) / n * 100
+        tbr_low = sum(1 for v in values if v < tbr_low_cut) / n * 100
+        tar_high = sum(1 for v in values if v > th) / n * 100
+        tar_vhigh = sum(1 for v in values if v > tar_vhigh_cut) / n * 100 if tar_vhigh_cut is not None else None
         cv = M.cv_percent(values)
         mean_bg = sum(values) / n
         gmi = M.gmi_percent(mean_bg)
@@ -977,66 +1038,73 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
                 citation=citation,
             )
 
-        # TIR (pediatric T1D ≥70 percent per ADA / ISPAD)
+        pop_cite = profile["citation"]
+        tir_min = profile["tir_min_pct"]
+        # TIR for the population's range
         checks.append(
             _make_check(
-                "TIR (70-180 mg/dL)",
+                f"TIR ({tl}-{th} mg/dL)",
                 tir,
-                ">70% (pediatric ADA / ISPAD 2022)",
-                tir >= 70,
-                "above_target" if tir >= 70 else "below_target",
-                "ok" if tir >= 70 else ("borderline" if tir >= 60 else "over"),
-                "ISPAD 2022 (Sherr/de Bock); Battelino 2019",
+                f">{tir_min:.0f}% ({profile['label']})",
+                tir >= tir_min,
+                "above_target" if tir >= tir_min else "below_target",
+                "ok" if tir >= tir_min else ("borderline" if tir >= tir_min - 10 else "over"),
+                pop_cite,
             )
         )
-        # TBR<54 (<1 percent per Battelino consensus)
+        # TBR very-low (<54): <1% for every population
+        vlow_max = profile["tbr_vlow_max_pct"]
         checks.append(
             _make_check(
-                "TBR <54 mg/dL",
-                tbr_54,
-                "<1% (international consensus)",
-                tbr_54 < 1.0,
-                "in_target" if tbr_54 < 1.0 else "above_target",
-                "ok" if tbr_54 < 1.0 else ("borderline" if tbr_54 < 2.0 else "severe"),
-                "Battelino 2019 Diabetes Care 42:1593",
+                f"TBR <{tbr_vlow_cut} mg/dL",
+                tbr_vlow,
+                f"<{vlow_max:.0f}% (international consensus)",
+                tbr_vlow < vlow_max,
+                "in_target" if tbr_vlow < vlow_max else "above_target",
+                "ok" if tbr_vlow < vlow_max else ("borderline" if tbr_vlow < vlow_max + 1 else "severe"),
+                pop_cite,
             )
         )
-        # TBR<70 (<4 percent per consensus)
+        # TBR low (<70 / <63 for pregnancy)
+        low_max = profile["tbr_low_max_pct"]
         checks.append(
             _make_check(
-                "TBR <70 mg/dL",
-                tbr_70,
-                "<4% (Battelino 2019)",
-                tbr_70 < 4.0,
-                "in_target" if tbr_70 < 4.0 else "above_target",
-                "ok" if tbr_70 < 4.0 else ("borderline" if tbr_70 < 7.0 else "over"),
-                "Battelino 2019",
+                f"TBR <{tbr_low_cut} mg/dL",
+                tbr_low,
+                f"<{low_max:.0f}% ({profile['label']})",
+                tbr_low < low_max,
+                "in_target" if tbr_low < low_max else "above_target",
+                "ok" if tbr_low < low_max else ("borderline" if tbr_low < low_max + 3 else "over"),
+                pop_cite,
             )
         )
-        # TAR>180 (<25 percent)
+        # TAR high (>180 / >140 for pregnancy)
+        high_max = profile["tar_high_max_pct"]
         checks.append(
             _make_check(
-                "TAR >180 mg/dL",
-                tar_180,
-                "<25% (Battelino 2019)",
-                tar_180 < 25.0,
-                "in_target" if tar_180 < 25.0 else "above_target",
-                "ok" if tar_180 < 25.0 else ("borderline" if tar_180 < 40.0 else "over"),
-                "Battelino 2019",
+                f"TAR >{th} mg/dL",
+                tar_high,
+                f"<{high_max:.0f}% ({profile['label']})",
+                tar_high < high_max,
+                "in_target" if tar_high < high_max else "above_target",
+                "ok" if tar_high < high_max else ("borderline" if tar_high < high_max + 15 else "over"),
+                pop_cite,
             )
         )
-        # TAR>250 (<5 percent)
-        checks.append(
-            _make_check(
-                "TAR >250 mg/dL",
-                tar_250,
-                "<5% (Battelino 2019)",
-                tar_250 < 5.0,
-                "in_target" if tar_250 < 5.0 else "above_target",
-                "ok" if tar_250 < 5.0 else ("borderline" if tar_250 < 10.0 else "over"),
-                "Battelino 2019",
+        # TAR very-high (>250) — populations without a separate band skip this
+        if tar_vhigh is not None and profile["tar_vhigh_max_pct"] is not None:
+            vhigh_max = profile["tar_vhigh_max_pct"]
+            checks.append(
+                _make_check(
+                    f"TAR >{tar_vhigh_cut} mg/dL",
+                    tar_vhigh,
+                    f"<{vhigh_max:.0f}% ({profile['label']})",
+                    tar_vhigh < vhigh_max,
+                    "in_target" if tar_vhigh < vhigh_max else "above_target",
+                    "ok" if tar_vhigh < vhigh_max else ("borderline" if tar_vhigh < vhigh_max + 5 else "over"),
+                    pop_cite,
+                )
             )
-        )
         # CV (<36 percent)
         checks.append(
             _make_check(
@@ -1101,15 +1169,16 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
         passed = sum(1 for c in checks if c.in_target)
         failed = sum(1 for c in checks if not c.in_target)
         worst = [c.metric_name for c in checks if c.severity == "severe"]
+        pop_prefix = f"[{profile['label']}] "
         if not failed:
-            headline = "All consensus targets met. Current settings appear well-tuned."
+            headline = f"{pop_prefix}All consensus targets met. Current settings appear well-tuned."
         elif worst:
             headline = (
-                f"{failed}/{len(checks)} consensus targets unmet. "
+                f"{pop_prefix}{failed}/{len(checks)} consensus targets unmet. "
                 f"Severe-band metrics requiring attention: {', '.join(worst)}."
             )
         else:
-            headline = f"{failed}/{len(checks)} consensus targets unmet (none severe)."
+            headline = f"{pop_prefix}{failed}/{len(checks)} consensus targets unmet (none severe)."
 
         return ConsensusTargetAudit(
             days=days,

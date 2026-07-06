@@ -73,7 +73,7 @@ Higher-level tools that compose the metrics suite into actionable outputs.
 |---|---|---|
 | `daily_synthesis` | Combined cross-tool clinical roll-up (stats + IOB/COB + ISF/CR + patterns) over a window, with a plain-English narrative | (composition) |
 | `dynisf_adjustment_recommender` | Recommends Dynamic ISF Adjustment Factor based on observed per-band ISF residuals. Distinguishes BG-curve dampening from uniform AF error per the deep-research decision tree. | Deep research report 2026-05-24 Key Finding #1 |
-| `consensus_target_audit` | One-shot pass/fail audit of patient metrics vs. Battelino 2019 / ISPAD 2022 / Klonoff 2023 / Kovatchev thresholds | Battelino 2019, ISPAD 2022 |
+| `consensus_target_audit` | One-shot pass/fail audit vs. Battelino 2019 / ISPAD 2022 / Klonoff 2023 / Kovatchev thresholds; `population` selects target set (`standard` / `older_high_risk` / `pregnancy_t1d`, with the pregnancy 63–140 range) | Battelino 2019, ISPAD 2022 |
 | `settings_change_attribution` | For each profile-switch event in window: pre-vs-post TIR / TBR / GRI with Benjamini-Hochberg FDR correction across changes | BH FDR (Benjamini & Hochberg 1995) |
 | `agp_markdown_render` | Markdown-rendered AGP with ASCII IQR-band visualization | Battelino 2019 AGP consensus |
 | `time_period_compare` | Two-window TIR / TBR<54 / GRI / LBGI / HBGI / CV / GMI side-by-side with 95% CIs and statistical-significance flagging | Wilson 1927 binomial CI |
