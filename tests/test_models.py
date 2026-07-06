@@ -85,3 +85,77 @@ def test_parse_iso_to_utc_handles_z_and_offset_variants() -> None:
     b = parse_iso_to_utc("2026-05-22T18:00:00.000+00:00")
     assert a == b
     assert a.tzinfo is not None
+
+
+def test_recommendation_models_carry_clinician_review_flag() -> None:
+    """Every payload that proposes a settings/dosing direction must ship the
+    structural requires_clinician_review flag (default True) so a client can
+    gate the advice behind care-team sign-off."""
+    from nightscout_mcp.models import (
+        CrDerivation,
+        DiaFitResult,
+        DynIsfRecommendation,
+        EffectiveIsfDerivation,
+        IsfDerivation,
+    )
+
+    isf = IsfDerivation(
+        sample_count=5,
+        derived_isf_mgdl_per_unit=50.0,
+        derived_isf_mmol_per_unit=2.8,
+        profile_isf_mmol_per_unit=2.0,
+        ratio_derived_over_profile=1.4,
+        confidence="medium",
+        recommendation="Consider raising profile ISF.",
+    )
+    assert isf.requires_clinician_review is True
+    assert isf.model_dump()["requires_clinician_review"] is True  # serialized
+
+    cr = CrDerivation(
+        sample_count=5,
+        derived_cr_g_per_unit=10.0,
+        profile_cr_g_per_unit=12.0,
+        ratio_derived_over_profile=0.83,
+        avg_end_minus_pre_mgdl=-20.0,
+        confidence="medium",
+        recommendation="Consider raising CR.",
+    )
+    assert cr.requires_clinician_review is True
+
+    eff = EffectiveIsfDerivation(
+        sample_count=5,
+        devicestatus_rows_examined=100,
+        samples_without_sens=2,
+        avg_effective_isf_mmol_per_unit=3.0,
+        avg_realized_isf_mmol_per_unit=3.5,
+        overall_ratio_realized_over_effective=1.17,
+        confidence="medium",
+        by_bg_band=[],
+        recommendation="AAPS appears to over-dose.",
+    )
+    assert eff.requires_clinician_review is True
+
+    dia = DiaFitResult(
+        sample_count=20,
+        best_dia_hours=5.5,
+        best_peak_min=55.0,
+        rmse=0.1,
+        profile_dia_hours=5.0,
+        recommendation_text="Trial DIA 5.5h.",
+        caveat_text="Exploratory.",
+    )
+    assert dia.requires_clinician_review is True
+
+    dyn = DynIsfRecommendation(
+        current_af=30,
+        recommended_af=25,
+        recommendation_type="lower_af",
+        overall_ratio=1.2,
+        in_target_ratio=1.1,
+        above_target_ratio=1.3,
+        confidence="medium",
+        sample_count=25,
+        reasoning="Over-dosing above target.",
+        caveat_text="Discuss with care team.",
+    )
+    assert dyn.requires_clinician_review is True

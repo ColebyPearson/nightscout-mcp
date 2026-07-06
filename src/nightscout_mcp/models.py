@@ -401,6 +401,10 @@ class IsfDerivation(BaseModel):
     ratio_derived_over_profile: float | None  # >1 means LESS sensitive than profile
     confidence: str  # "low" | "medium" | "high"
     recommendation: str
+    requires_clinician_review: bool = True
+    """Structural flag: this payload proposes a settings/dosing direction. A
+    client should gate the recommendation behind care-team sign-off, never
+    surface it as an actionable instruction on its own."""
 
 
 class IsfBandSample(BaseModel):
@@ -441,6 +445,8 @@ class EffectiveIsfDerivation(BaseModel):
     confidence: str  # "low" | "medium" | "high"
     by_bg_band: list[IsfBandSample]
     recommendation: str
+    requires_clinician_review: bool = True
+    """See IsfDerivation.requires_clinician_review — gate behind care-team review."""
 
 
 class GlucoseAtTime(BaseModel):
@@ -474,6 +480,8 @@ class CrDerivation(BaseModel):
     avg_end_minus_pre_mgdl: float | None  # post-meal residual signal
     confidence: str  # "low" | "medium" | "high"
     recommendation: str
+    requires_clinician_review: bool = True
+    """See IsfDerivation.requires_clinician_review — gate behind care-team review."""
 
 
 class SuspectedCompression(BaseModel):
@@ -810,6 +818,8 @@ class DiaFitResult(BaseModel):
     profile_dia_hours: float
     recommendation_text: str
     caveat_text: str
+    requires_clinician_review: bool = True
+    """See IsfDerivation.requires_clinician_review — gate behind care-team review."""
 
 
 class DataSufficiency(BaseModel):
@@ -864,6 +874,8 @@ class DynIsfRecommendation(BaseModel):
     sample_count: int
     reasoning: str
     caveat_text: str
+    requires_clinician_review: bool = True
+    """See IsfDerivation.requires_clinician_review — proposes an AF value; gate it."""
 
 
 class TargetCheck(BaseModel):
