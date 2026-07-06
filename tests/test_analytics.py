@@ -282,6 +282,53 @@ def test_isf_check_less_sensitive_recommends_lowering_isf() -> None:
     assert "healthcare provider" in r.recommendation
 
 
+def test_overnight_analysis_excludes_zero_sgv_phantom_low() -> None:
+    """A sensor-warmup/error 0 must not register as a severe low (min_mgdl=0)."""
+    base = datetime(2026, 5, 22, 2, 0, tzinfo=UTC)
+    readings = [
+        _sgv(0, base),  # warmup/error — must be dropped
+        _sgv(120, base + timedelta(minutes=5)),
+        _sgv(110, base + timedelta(minutes=10)),
+    ]
+    r = overnight_analysis("2026-05-22", readings)
+    assert r.min_mgdl == 110  # not 0
+    assert r.time_below_54_minutes == 0  # phantom 0 must not inflate TBR<54
+
+
+def test_overnight_analysis_dawn_anchors_use_local_time() -> None:
+    """Dawn rise anchors 03:00/07:00 must be matched in LOCAL time.
+
+    With a -5h offset, UTC 08:00/12:00 are local 03:00/07:00. A UTC-only match
+    would find nothing and return dawn_rise_mgdl=None.
+    """
+    day = datetime(2026, 5, 22, 0, 0, tzinfo=UTC)
+    readings = [
+        _sgv(100, day + timedelta(hours=8)),  # local 03:00
+        _sgv(140, day + timedelta(hours=12)),  # local 07:00
+    ]
+    r = overnight_analysis("2026-05-22", readings, tz_offset_hours=-5.0)
+    assert r.dawn_rise_mgdl == 40
+    # And with the (wrong) UTC default, these anchors don't resolve.
+    r_utc = overnight_analysis("2026-05-22", readings)
+    assert r_utc.dawn_rise_mgdl is None
+
+
+def test_detect_patterns_overnight_low_uses_local_time() -> None:
+    """An overnight low must be judged by local hour, not UTC hour.
+
+    With offset -5h, a low at UTC 08:30 is local 03:30 -> counts as overnight.
+    A low at UTC 02:00 is local 21:00 (evening) -> must NOT count.
+    """
+    day = datetime(2026, 5, 22, 0, 0, tzinfo=UTC)
+    overnight_groups = [("2026-05-22", [_sgv(60, day + timedelta(hours=8, minutes=30))])]
+    r = detect_patterns(1, overnight_groups, tz_offset_hours=-5.0)
+    assert any(p.type == "overnight_low" for p in r.patterns)
+
+    evening_groups = [("2026-05-22", [_sgv(60, day + timedelta(hours=2))])]
+    r2 = detect_patterns(1, evening_groups, tz_offset_hours=-5.0)
+    assert not any(p.type == "overnight_low" for p in r2.patterns)
+
+
 def test_isf_check_excludes_boluses_near_carbs() -> None:
     """A correction bolus within ±60 min of a carb entry should be ignored."""
     base = datetime(2026, 5, 22, 12, 0, tzinfo=UTC)

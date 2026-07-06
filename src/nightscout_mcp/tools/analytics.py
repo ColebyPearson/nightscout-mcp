@@ -48,6 +48,7 @@ from ..models import (
     Treatment,
     parse_iso_to_utc,
 )
+from ..units import mgdl_to_mmol
 
 MAX_ENTRY_COUNT_PER_PAGE = 2000
 PAGINATION_TOTAL_CAP = 20000  # safety bound; ~14 days at 1min cadence = 20K
@@ -86,6 +87,26 @@ def _parse_date_in_timezone(s: str, tz_name: str | None) -> datetime:
     return local_midnight.astimezone(UTC)
 
 
+def _tz_offset_hours(tz_name: str | None, at: datetime) -> float:
+    """UTC offset in hours for a zone at a given instant (DST-aware).
+
+    Returns 0.0 (UTC) when no zone is given or it can't be resolved.
+    """
+    if not tz_name:
+        return 0.0
+    try:
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+        try:
+            tz = ZoneInfo(tz_name)
+        except ZoneInfoNotFoundError:
+            return 0.0
+    except ImportError:
+        return 0.0
+    offset = at.astimezone(tz).utcoffset()
+    return offset.total_seconds() / 3600 if offset is not None else 0.0
+
+
 async def _resolve_timezone(client: NightscoutClient) -> str | None:
     """Look up the user's timezone from the active profile. Caller passes the
     result through to _parse_date_in_timezone.
@@ -101,9 +122,7 @@ async def _resolve_timezone(client: NightscoutClient) -> str | None:
     return None
 
 
-async def _fetch_sgvs_between(
-    client: NightscoutClient, start: datetime, end: datetime
-) -> list[Sgv]:
+async def _fetch_sgvs_between(client: NightscoutClient, start: datetime, end: datetime) -> list[Sgv]:
     """Fetch SGVs in [start, end), paginating through Nightscout's per-request cap.
 
     Single requests are capped at 2000 rows by Nightscout's API3_MAX_LIMIT
@@ -142,9 +161,7 @@ async def _fetch_sgvs_between(
     return [Sgv.model_validate(r) for r in all_rows]
 
 
-async def _fetch_treatments_between(
-    client: NightscoutClient, start: datetime, end: datetime
-) -> list[Treatment]:
+async def _fetch_treatments_between(client: NightscoutClient, start: datetime, end: datetime) -> list[Treatment]:
     """Paginated treatment fetch in [start, end). Same approach as SGVs."""
     all_rows: list[dict[str, Any]] = []
     current_end = end
@@ -181,9 +198,7 @@ async def _fetch_treatments_between(
     return [Treatment.model_validate(r) for r in all_rows]
 
 
-async def _fetch_devicestatus_between(
-    client: NightscoutClient, start: datetime, end: datetime
-) -> list[dict[str, Any]]:
+async def _fetch_devicestatus_between(client: NightscoutClient, start: datetime, end: datetime) -> list[dict[str, Any]]:
     """Paginated devicestatus fetch in [start, end), returning raw dicts.
 
     Devicestatus rows aren't modeled — analytics needs the full nested
@@ -247,14 +262,21 @@ async def _extract_profile_settings(
         record = profile[0] if isinstance(profile, list) and profile else profile
         sub = (record.get("store") or {}).get(record.get("defaultProfile", "Default"))
         if sub:
-            isf_entries = sub.get("sens") or []
-            if isf_entries:
-                profile_isf = float(isf_entries[0].get("value", 0)) or None
+            # Normalize units first — Nightscout emits "mmol", "mg/dl", "mg/dL".
+            raw_units = str(sub.get("units", "mmol")).lower()
+            units = "mg/dL" if raw_units in ("mg/dl", "mgdl") else "mmol"
             cr_entries = sub.get("carbratio") or []
             if cr_entries:
                 profile_cr = float(cr_entries[0].get("value", 0)) or None
+            isf_entries = sub.get("sens") or []
+            if isf_entries:
+                raw_isf = float(isf_entries[0].get("value", 0)) or None
+                # The `sens` value is in the profile's own units. Callers expect
+                # mmol/L per U, so convert mg/dL profiles. (Skipping this yields
+                # an ~18x wrong ratio in insulin_sensitivity_check.)
+                if raw_isf is not None:
+                    profile_isf = mgdl_to_mmol(raw_isf) if units == "mg/dL" else raw_isf
             dia = float(sub.get("dia", 5.0) or 5.0)
-            units = sub.get("units", "mmol")
     except (AttributeError, KeyError, IndexError, TypeError):
         pass
     return profile_isf, profile_cr, dia, units
@@ -278,9 +300,7 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
         tz_name = timezone or await _resolve_timezone(client)
         start = _parse_date_in_timezone(date, tz_name)
         end = start + timedelta(days=1)
-        sgvs, txs = await _fetch_sgvs_between(client, start, end), await _fetch_treatments_between(
-            client, start, end
-        )
+        sgvs, txs = await _fetch_sgvs_between(client, start, end), await _fetch_treatments_between(client, start, end)
         return _daily_report(date, sgvs, txs)
 
     @mcp.tool()
@@ -313,15 +333,12 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
         b_end = _parse_date_in_timezone(period_b_end, tz_name)
         if (a_end - a_start) != (b_end - b_start):
             raise ValueError(
-                "compare_periods requires equal-length periods; "
-                f"got A={a_end - a_start}, B={b_end - b_start}."
+                f"compare_periods requires equal-length periods; got A={a_end - a_start}, B={b_end - b_start}."
             )
         hours = int((a_end - a_start).total_seconds() // 3600)
         readings_a = await _fetch_sgvs_between(client, a_start, a_end)
         readings_b = await _fetch_sgvs_between(client, b_start, b_end)
-        return _compare_periods(
-            period_a_label, readings_a, period_b_label, readings_b, hours_each=hours
-        )
+        return _compare_periods(period_a_label, readings_a, period_b_label, readings_b, hours_each=hours)
 
     @mcp.tool()
     async def analyze_meal(
@@ -355,16 +372,13 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
         candidates = [
             t
             for t in txs
-            if (t.carbs and t.carbs > 0)
-            or t.event_type in ("Carb Correction", "Meal Bolus", "Snack Bolus")
+            if (t.carbs and t.carbs > 0) or t.event_type in ("Carb Correction", "Meal Bolus", "Snack Bolus")
         ]
         meal = candidates[0] if candidates else None
         return _analyze_meal(meal_time, meal, sgvs, window_hours)
 
     @mcp.tool()
-    async def overnight_analysis(
-        date: str, timezone: str | None = None
-    ) -> OvernightAnalysis:
+    async def overnight_analysis(date: str, timezone: str | None = None) -> OvernightAnalysis:
         """Characterize the overnight window (00:00-07:00 local) for one date.
 
         Args:
@@ -378,29 +392,37 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
         start = _parse_date_in_timezone(date, tz_name)
         end = start + timedelta(hours=7)
         sgvs = await _fetch_sgvs_between(client, start, end)
-        return _overnight_analysis(date, sgvs)
+        offset = _tz_offset_hours(tz_name, start)
+        return _overnight_analysis(date, sgvs, tz_offset_hours=offset)
 
     @mcp.tool()
-    async def detect_patterns(days: int = 14) -> DetectedPatterns:
+    async def detect_patterns(days: int = 14, timezone: str | None = None) -> DetectedPatterns:
         """Detect recurring glucose patterns over the past N days.
 
-        Patterns: overnight lows, dawn phenomenon, post-meal spikes.
+        Patterns: overnight lows, dawn phenomenon, post-meal spikes. Overnight
+        and dawn windows are evaluated in local time so "overnight" means the
+        patient's night, not 00:00-06:00 UTC.
 
         Args:
             days: number of days to analyze. Default 14, max 30.
+            timezone: Olson zone name; if None, auto-detect from profile.
         """
         client = get_client()
         days = max(1, min(days, 30))
+        tz_name = timezone or await _resolve_timezone(client)
         end = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
         start = end - timedelta(days=days)
+        offset = _tz_offset_hours(tz_name, start)
         sgvs = await _fetch_sgvs_between(client, start, end)
-        # Group by date string (YYYY-MM-DD)
+        # Group by LOCAL date string (YYYY-MM-DD) so a night belongs to its
+        # local calendar day, not the UTC one.
         grouped: dict[str, list[Sgv]] = {}
         for s in sgvs:
-            date_key = parse_iso_to_utc(s.date_iso).strftime("%Y-%m-%d")
+            local_ts = parse_iso_to_utc(s.date_iso) + timedelta(hours=offset)
+            date_key = local_ts.strftime("%Y-%m-%d")
             grouped.setdefault(date_key, []).append(s)
         daily_groups = sorted(grouped.items())
-        return _detect_patterns(days, daily_groups)
+        return _detect_patterns(days, daily_groups, tz_offset_hours=offset)
 
     @mcp.tool()
     async def insulin_sensitivity_check(days: int = 14) -> IsfDerivation:

@@ -57,6 +57,10 @@ ISF_BG_BANDS: list[tuple[str, int, int | None]] = [
     ("above_target", 180, None),
 ]
 
+# Appended to any recommendation that proposes a settings change, matching the
+# clinician-consult framing used by effective_isf_check / insulin_sensitivity_check.
+_CR_SAFETY = " This is advisory only. Do not change AAPS/pump settings without consulting your healthcare provider."
+
 
 def daily_report(
     date_str: str,
@@ -213,8 +217,18 @@ def analyze_meal(
     )
 
 
-def _readings_at_hour(readings: list[Sgv], target_hour: int) -> Sgv | None:
-    """Find the SGV closest to a given UTC hour from a sorted list."""
+def _local_hour_minute(ts: datetime, tz_offset_hours: float) -> tuple[int, int]:
+    """Local wall-clock (hour, minute) for a UTC timestamp given a fixed offset."""
+    local = ts + timedelta(hours=tz_offset_hours)
+    return local.hour, local.minute
+
+
+def _readings_at_hour(readings: list[Sgv], target_hour: int, tz_offset_hours: float = 0.0) -> Sgv | None:
+    """Find the SGV closest to a given LOCAL hour from a sorted list.
+
+    `tz_offset_hours` shifts each UTC timestamp to local wall-clock before
+    matching; default 0.0 keeps the historical UTC behaviour.
+    """
     if not readings:
         return None
     target_minute = target_hour * 60
@@ -222,16 +236,22 @@ def _readings_at_hour(readings: list[Sgv], target_hour: int) -> Sgv | None:
     best_diff = 10**9
     for r in readings:
         ts = parse_iso_to_utc(r.date_iso)
-        minute = ts.hour * 60 + ts.minute
-        diff = abs(minute - target_minute)
+        hour, minute = _local_hour_minute(ts, tz_offset_hours)
+        diff = abs((hour * 60 + minute) - target_minute)
         if diff < best_diff:
             best_diff = diff
             best = r
     return best if best_diff <= 60 else None  # within 1 hour
 
 
-def overnight_analysis(date_iso: str, readings: list[Sgv]) -> OvernightAnalysis:
-    """Characterize the 00:00–07:00 UTC window for the given date."""
+def overnight_analysis(date_iso: str, readings: list[Sgv], tz_offset_hours: float = 0.0) -> OvernightAnalysis:
+    """Characterize the overnight window for the given date.
+
+    Dawn anchors (03:00 / 07:00) are matched in LOCAL wall-clock time via
+    `tz_offset_hours`; default 0.0 is UTC. Zero/error SGVs (sensor warmup,
+    calibration errors) are excluded so a bogus `0` never registers as a low.
+    """
+    readings = [r for r in readings if r.sgv_mgdl > 0]
     if not readings:
         return OvernightAnalysis(
             night_date=date_iso,
@@ -257,8 +277,8 @@ def overnight_analysis(date_iso: str, readings: list[Sgv]) -> OvernightAnalysis:
     below_70 = sum(1 for v in values if v < 70) * 5
     below_54 = sum(1 for v in values if v < 54) * 5
 
-    at_3 = _readings_at_hour(sorted_r, 3)
-    at_7 = _readings_at_hour(sorted_r, 7)
+    at_3 = _readings_at_hour(sorted_r, 3, tz_offset_hours)
+    at_7 = _readings_at_hour(sorted_r, 7, tz_offset_hours)
     dawn_rise = (at_7.sgv_mgdl - at_3.sgv_mgdl) if (at_3 and at_7) else None
 
     deltas = [abs(values[i + 1] - values[i]) for i in range(len(values) - 1)]
@@ -279,10 +299,17 @@ def overnight_analysis(date_iso: str, readings: list[Sgv]) -> OvernightAnalysis:
     )
 
 
-def detect_patterns(days: int, daily_groups: list[tuple[str, list[Sgv]]]) -> DetectedPatterns:
+def detect_patterns(
+    days: int,
+    daily_groups: list[tuple[str, list[Sgv]]],
+    tz_offset_hours: float = 0.0,
+) -> DetectedPatterns:
     """Detect recurring patterns across multiple days.
 
     `daily_groups` is a list of (date_str, readings_for_that_day) tuples.
+    Overnight/dawn windows are evaluated in LOCAL wall-clock time via
+    `tz_offset_hours` (default 0.0 = UTC). Zero/error SGVs are excluded so a
+    sensor-warmup `0` never registers as a false overnight low.
     """
     overnight_low_times: list[str] = []
     overnight_low_values: list[int] = []
@@ -291,18 +318,20 @@ def detect_patterns(days: int, daily_groups: list[tuple[str, list[Sgv]]]) -> Det
     spike_times: list[str] = []
     spike_values: list[int] = []
 
-    for date_str, readings in daily_groups:
+    for date_str, day_readings in daily_groups:
+        readings = [r for r in day_readings if r.sgv_mgdl > 0]
         if not readings:
             continue
-        # Overnight low: any sgv < 70 between 00:00 and 06:00 UTC
+        # Overnight low: any sgv < 70 between 00:00 and 06:00 LOCAL time
         for r in readings:
             ts = parse_iso_to_utc(r.date_iso)
-            if ts.hour < 6 and r.sgv_mgdl < 70:
+            local_hour, _ = _local_hour_minute(ts, tz_offset_hours)
+            if local_hour < 6 and r.sgv_mgdl < 70:
                 overnight_low_times.append(r.date_iso)
                 overnight_low_values.append(r.sgv_mgdl)
                 break  # one per night
         # Dawn rise
-        on = overnight_analysis(date_str, readings)
+        on = overnight_analysis(date_str, readings, tz_offset_hours)
         if on.dawn_rise_mgdl is not None and on.dawn_rise_mgdl > DAWN_RISE_THRESHOLD_MGDL:
             dawn_rises.append(on.dawn_rise_mgdl)
             dawn_rise_times.append(date_str)
@@ -326,7 +355,7 @@ def detect_patterns(days: int, daily_groups: list[tuple[str, list[Sgv]]]) -> Det
                 avg_value_mgdl=round(statistics.fmean(overnight_low_values), 1),
                 description=(
                     f"Glucose dipped to avg {round(statistics.fmean(overnight_low_values))} mg/dL "
-                    f"between 00:00-06:00 on {len(overnight_low_times)} of {days} nights."
+                    f"between 00:00-06:00 local on {len(overnight_low_times)} of {days} nights."
                 ),
             )
         )
@@ -339,8 +368,8 @@ def detect_patterns(days: int, daily_groups: list[tuple[str, list[Sgv]]]) -> Det
                 avg_value_mgdl=round(statistics.fmean(dawn_rises), 1),
                 description=(
                     f"Dawn rise > {DAWN_RISE_THRESHOLD_MGDL} mg/dL on {len(dawn_rises)} of {days} "
-                    "mornings (03:00 → 07:00). Consider increasing pre-dawn basal or reviewing "
-                    "overnight insulin needs."
+                    "mornings (03:00 → 07:00 local). Overnight/pre-dawn insulin adequacy may be "
+                    "worth reviewing with your care team."
                 ),
             )
         )
@@ -964,9 +993,9 @@ def carb_ratio_check(
     elif cr_signal == 0 and res_signal == 0:
         parts.append("Both signals are stable — CR looks well-tuned.")
     elif cr_signal == res_signal and cr_signal == +1:
-        parts.append("Both signals suggest CR is too high (too few units per gram). Consider lowering CR.")
+        parts.append("Both signals suggest CR is too high (too few units per gram). Consider lowering CR." + _CR_SAFETY)
     elif cr_signal == res_signal and cr_signal == -1:
-        parts.append("Both signals suggest CR is too low (too many units per gram). Consider raising CR.")
+        parts.append("Both signals suggest CR is too low (too many units per gram). Consider raising CR." + _CR_SAFETY)
     elif cr_signal != 0 and res_signal != 0 and cr_signal != res_signal:
         parts.append(
             "Signals disagree: applied CR and post-meal residual point in opposite directions. "

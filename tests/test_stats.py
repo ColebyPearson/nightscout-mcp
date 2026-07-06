@@ -46,9 +46,7 @@ def test_in_range_all_100_means_100_pct_tir() -> None:
 def test_mixed_tir_bands_sum_correctly() -> None:
     # 5 lows (<70), 10 in-range, 5 highs (>180)
     readings = (
-        [_sgv(60, i) for i in range(5)]
-        + [_sgv(120, i + 5) for i in range(10)]
-        + [_sgv(220, i + 15) for i in range(5)]
+        [_sgv(60, i) for i in range(5)] + [_sgv(120, i + 5) for i in range(10)] + [_sgv(220, i + 15) for i in range(5)]
     )
     s = compute_stats(readings, window_hours=2)
     assert s.reading_count == 20
@@ -73,6 +71,24 @@ def test_custom_thresholds_are_respected() -> None:
     assert s.tir_percent == 100.0
     assert s.tir_low_threshold_mgdl == 90
     assert s.tir_high_threshold_mgdl == 110
+
+
+def test_zero_sgv_excluded_from_stats() -> None:
+    # A sensor-warmup/error 0 (type=="sgv", sgv==0) must not be counted as a
+    # severe low — that would fabricate TBR<54 and drag the mean down.
+    readings = [_sgv(0, 0), _sgv(100, 1), _sgv(110, 2)]
+    s = compute_stats(readings, window_hours=1)
+    assert s.reading_count == 2  # the 0 is dropped
+    assert s.tbr_lt54_percent == 0.0
+    assert s.mean_mgdl == 105.0
+
+
+def test_gmi_reliable_flag_tracks_window_length() -> None:
+    readings = [_sgv(120, i) for i in range(10)]
+    assert compute_stats(readings, window_hours=24).gmi_reliable is False  # 1 day
+    assert compute_stats(readings, window_hours=24 * 14).gmi_reliable is True  # 14 days
+    # Empty-window path also sets the flag.
+    assert compute_stats([], window_hours=24).gmi_reliable is False
 
 
 def test_non_sgv_entries_excluded() -> None:

@@ -36,8 +36,15 @@ def compute_stats(
     Empty input returns a zero-filled stats object (NOT an error). The LLM
     is better served by an explicit "0 readings" than by a thrown exception.
     """
-    values = [r.sgv_mgdl for r in readings if r.type == "sgv"]
+    # Exclude zero/error SGVs (sensor warmup, calibration errors). Nightscout
+    # stores these as type=="sgv" with sgv==0; counting them fabricates severe
+    # lows and inflates TBR<54.
+    values = [r.sgv_mgdl for r in readings if r.type == "sgv" and r.sgv_mgdl > 0]
     n = len(values)
+
+    # GMI approximates ~3 months of mean glucose as an A1C-equivalent; it is only
+    # interpretable over a sustained window (Bergenstal 2018 validity ≥14 days).
+    gmi_reliable = window_hours >= 24 * 14
 
     if n == 0:
         return GlucoseStats(
@@ -48,6 +55,7 @@ def compute_stats(
             sd_mgdl=0.0,
             cv_percent=0.0,
             gmi_percent=0.0,
+            gmi_reliable=gmi_reliable,
             tir_percent=0.0,
             tbr_lt70_percent=0.0,
             tbr_lt54_percent=0.0,
@@ -78,6 +86,7 @@ def compute_stats(
         sd_mgdl=round(sd, 1),
         cv_percent=round(cv, 1),
         gmi_percent=gmi_percent(mean),
+        gmi_reliable=gmi_reliable,
         tir_percent=pct(in_range),
         tbr_lt70_percent=pct(below_70),
         tbr_lt54_percent=pct(below_54),
