@@ -4,7 +4,14 @@ from __future__ import annotations
 
 import logging
 
-from nightscout_mcp.logging_setup import TokenScrubFilter
+import pytest
+
+from nightscout_mcp.logging_setup import (
+    _SECRETS,
+    ScrubbingFormatter,
+    TokenScrubFilter,
+    register_secret,
+)
 
 
 def _emit(logger: logging.Logger, msg: str, *args: object) -> str:
@@ -73,3 +80,47 @@ def test_handles_args_substitution() -> None:
     )
     assert "secret-token-value-here" not in out
     assert "token=***" in out
+
+
+@pytest.fixture
+def _registered_secret():
+    token = "mcp-reader-canary-XYZ789"
+    register_secret(token)
+    yield token
+    _SECRETS.discard(token)
+
+
+def test_registered_secret_redacted_in_any_shape(_registered_secret: str) -> None:
+    token = _registered_secret
+    # Value-based scrubbing catches the token even where no `token=` key exists —
+    # e.g. embedded in a JSON body or bare in prose.
+    out = _emit(logging.getLogger("t"), f'{{"auth": "{token}"}} used for request')
+    assert token not in out
+    assert "***" in out
+
+
+def test_registered_secret_redacted_in_exception_traceback(
+    _registered_secret: str,
+) -> None:
+    """The killer case: a formatted traceback (which a Filter never sees) must
+    still have the token stripped by the ScrubbingFormatter."""
+    token = _registered_secret
+    fmt = ScrubbingFormatter(fmt="%(levelname)s %(message)s")
+    try:
+        raise RuntimeError(f"Client error for url 'https://x.test/api/v1/entries.json?token={token}'")
+    except RuntimeError:
+        logger = logging.getLogger("t")
+        record = logger.makeRecord("t", logging.ERROR, "f", 1, "boom", None, exc_info=__import__("sys").exc_info())
+    rendered = fmt.format(record)
+    assert token not in rendered  # traceback text scrubbed
+    assert "***" in rendered
+
+
+def test_bearer_scrub_is_case_insensitive() -> None:
+    out = _emit(logging.getLogger("t"), "authorization: bearer eyJlow.case.jwt")
+    assert "eyJlow.case.jwt" not in out
+
+
+def test_non_hex_api_secret_scrubbed() -> None:
+    out = _emit(logging.getLogger("t"), "api-secret: NotHexButStillSecret!123")
+    assert "NotHexButStillSecret" not in out
