@@ -16,7 +16,7 @@ from typing import Any
 import httpx
 
 from .config import Settings
-from .logging_setup import TokenScrubFilter
+from .logging_setup import TokenScrubFilter, register_secret
 
 # Be polite to free-tier Heroku/Atlas Nightscout instances.
 _DEFAULT_TIMEOUT = httpx.Timeout(connect=5.0, read=15.0, write=10.0, pool=5.0)
@@ -48,6 +48,9 @@ class NightscoutClient:
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
+        # Value-based log scrubbing: redact this token wherever it appears in
+        # logs (incl. tracebacks / JSON bodies), not just token-shaped patterns.
+        register_secret(settings.nightscout_token)
         _ensure_httpx_logger_scrubbed()
         self._http = httpx.AsyncClient(
             base_url=settings.base_url,
