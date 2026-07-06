@@ -242,6 +242,46 @@ def test_isf_check_derives_from_isolated_corrections() -> None:
     assert r.confidence == "low"  # <3 samples
 
 
+def test_isf_check_more_sensitive_recommends_raising_isf() -> None:
+    """Regression: derived ISF > profile means over-dosing corrections -> hypo.
+
+    The safe direction is to RAISE profile ISF (higher ISF number = smaller
+    correction dose). Guards against a directional inversion that would deepen
+    lows. See effective_isf_check, which resolves the same signal identically.
+    """
+    base = datetime(2026, 5, 22, 12, 0, tzinfo=UTC)
+    sgvs = [
+        _sgv(200, base - timedelta(minutes=10)),
+        _sgv(150, base + timedelta(hours=3)),
+    ]
+    txs = [_tx("Correction Bolus", base, insulin=1.0)]
+    # Derived ISF ~50 mg/dL/U (2.78 mmol); profile only 1.7 mmol -> ratio ~1.63.
+    r = insulin_sensitivity_check(txs, sgvs, profile_isf_mmol=1.7)
+    assert r.ratio_derived_over_profile is not None
+    assert r.ratio_derived_over_profile > 1.15
+    assert "RAISING profile ISF" in r.recommendation
+    assert "lowering profile ISF" not in r.recommendation.lower()
+    assert "healthcare provider" in r.recommendation  # safety disclaimer present
+
+
+def test_isf_check_less_sensitive_recommends_lowering_isf() -> None:
+    """Derived ISF < profile means under-dosing corrections -> the safe
+    direction is to LOWER profile ISF (lower number = larger dose)."""
+    base = datetime(2026, 5, 22, 12, 0, tzinfo=UTC)
+    sgvs = [
+        _sgv(200, base - timedelta(minutes=10)),
+        _sgv(150, base + timedelta(hours=3)),
+    ]
+    txs = [_tx("Correction Bolus", base, insulin=1.0)]
+    # Derived ISF ~50 mg/dL/U (2.78 mmol); profile 5.0 mmol -> ratio ~0.56.
+    r = insulin_sensitivity_check(txs, sgvs, profile_isf_mmol=5.0)
+    assert r.ratio_derived_over_profile is not None
+    assert r.ratio_derived_over_profile < 0.85
+    assert "LOWERING profile ISF" in r.recommendation
+    assert "raising profile ISF" not in r.recommendation.lower()
+    assert "healthcare provider" in r.recommendation
+
+
 def test_isf_check_excludes_boluses_near_carbs() -> None:
     """A correction bolus within ±60 min of a carb entry should be ignored."""
     base = datetime(2026, 5, 22, 12, 0, tzinfo=UTC)
@@ -439,9 +479,7 @@ def test_effective_isf_check_happy_path_in_target_band() -> None:
     dss: list[dict] = []
     for i in range(4):
         t = base + timedelta(hours=6 * i)
-        s, tx, ds = _correction_with_drop(
-            t, pre_mgdl=140, min_mgdl=90, units=1.0, sens_at_decision=2.8
-        )
+        s, tx, ds = _correction_with_drop(t, pre_mgdl=140, min_mgdl=90, units=1.0, sens_at_decision=2.8)
         sgvs += s
         txs += tx
         dss += ds
@@ -610,9 +648,7 @@ def test_effective_isf_check_band_boundary_assignment() -> None:
     assert by["in_target"].sample_count == 1
     assert by["below_target"].sample_count == 0
     # And 180 should fall in above_target
-    sgvs2, txs2, dss2 = _correction_with_drop(
-        base + timedelta(days=1), 180, 130, 1.0, sens_at_decision=2.8
-    )
+    sgvs2, txs2, dss2 = _correction_with_drop(base + timedelta(days=1), 180, 130, 1.0, sens_at_decision=2.8)
     r2 = effective_isf_check(txs2, sgvs2, dss2, profile_units="mmol")
     by2 = {b.band_label: b for b in r2.by_bg_band}
     assert by2["above_target"].sample_count == 1
