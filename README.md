@@ -246,4 +246,4 @@ Architecture: [PLAN.md](./PLAN.md). Issue-driven workflow with self-reviewed PRs
 - The [official MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk) and the FastMCP decorator API.
 - Bergenstal et al., *Diabetes Care* 2018; 41:2275–2280 — for the GMI formula used in `get_glucose_stats`.
 
-> **Why I built this:** I wanted an LLM analyst that could reason over my actual Nightscout history without me having to copy-paste CSVs. The existing options either had no tests, shipped destructive writes, or targeted a future platform. So I built the one I wanted to use.
+
