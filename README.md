@@ -63,7 +63,7 @@ Canonical CGM metrics from the clinical literature, computed from existing Night
 | `change_points_bg` | Windowed mean-shift change-point detection on hourly mean BG, annotated with profile changes | Page 1954 (CUSUM family) |
 | `change_points_tdd` | Same on daily total daily dose (catches puberty/illness/site shifts) | |
 | `dia_fit_estimate` | Exploratory fit of AAPS exponential IOB curve to observed bolus residuals → suggested DIA + peak | oref0 exponential / AAPS Oref |
-| `clinic_packet` | Composite 30-day markdown report (TIR + GRI + LBGI/HBGI + per-meal-period + change-points) ready to share with endo team | |
+| `clinic_packet` | AGP-grade 30-day markdown report: CGM-coverage header, TIR + Time-in-Tight-Range + GRI + LBGI/HBGI, consensus hypo-event counts, insulin/carb summary, embedded AGP median+IQR ribbon, per-day profiles, per-meal-period, change-points — ready to share with the endo team | Battelino 2019 |
 
 ### Composition tools (6)
 

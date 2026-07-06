@@ -26,6 +26,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from .. import metrics as M
+from ..analytics import hypo_episodes as _hypo_episodes
 from ..client import NightscoutClient
 from ..models import (
     AgpHourPoint,
@@ -736,6 +737,53 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
         # Data sufficiency — flag before any consensus-branded metric is trusted.
         suff = M.data_sufficiency(sgvs, days)
 
+        # Time in Tight Range (70-140) — increasingly requested at pediatric visits.
+        titr = sum(1 for v in values if 70 <= v <= 140) / n * 100 if n else 0.0
+
+        # Insulin & carb summary (bolus + carbs are what treatments record reliably;
+        # basal delivery isn't a discrete treatment, so this is labelled as bolus,
+        # not full TDD, to avoid over-claiming).
+        bolus_txs = [t for t in treatments if t.insulin and t.insulin > 0]
+        carb_txs = [t for t in treatments if t.carbs and t.carbs > 0]
+        total_bolus_u = sum(t.insulin for t in bolus_txs if t.insulin)
+        total_carbs_g = sum(t.carbs for t in carb_txs if t.carbs)
+        mean_daily_bolus = total_bolus_u / days
+        mean_daily_carbs = total_carbs_g / days
+        boluses_per_day = len(bolus_txs) / days
+
+        # Consensus hypo-event counts (Battelino 2019 / ATTD >=15-min events).
+        hypo = _hypo_episodes(days, sgvs, treatments, tz_offset_hours=tz_offset_hours)
+
+        # AGP percentile ribbon (median + IQR band) embedded directly.
+        agp_hourly = M.agp_hourly_percentiles(pairs, tz_offset_hours=tz_offset_hours)
+        agp_lines: list[str] = []
+        for h in agp_hourly:
+            hn = int(h.get("sample_count", 0))
+            p25 = h.get("p25", 0.0)
+            p50 = h.get("p50", 0.0)
+            p75 = h.get("p75", 0.0)
+            iqr_start = int(min(40, max(0, p25 / 10)))
+            iqr_end = int(min(40, max(0, p75 / 10)))
+            bar = " " * iqr_start + "=" * max(1, iqr_end - iqr_start) + " " * max(0, 40 - iqr_end)
+            p50_pos = int(min(39, max(0, p50 / 10)))
+            bar = bar[:p50_pos] + "*" + bar[p50_pos + 1 :]
+            agp_lines.append(f"| {int(h['hour']):02d} | {hn:4d} | {p50:5.0f} | `{bar}` |")
+
+        # Per-day thumbnails (local calendar day) — what a clinician scans for
+        # overnight lows. A day whose nadir is <54 is flagged.
+        by_day: dict[str, list[float]] = {}
+        for ts, v in pairs:
+            key = (ts + timedelta(hours=tz_offset_hours)).strftime("%Y-%m-%d")
+            by_day.setdefault(key, []).append(v)
+        day_lines: list[str] = []
+        for day in sorted(by_day):
+            dv = by_day[day]
+            dmean = sum(dv) / len(dv)
+            dtir = sum(1 for x in dv if 70 <= x <= 180) / len(dv) * 100
+            dmin = min(dv)
+            flag = " ⚠️<54" if dmin < 54 else (" ⚠️<70" if dmin < 70 else "")
+            day_lines.append(f"| {day} | {len(dv):4d} | {dmean:5.0f} | {dtir:5.0f}% | {dmin:4.0f}{flag} |")
+
         # Headline findings (priorities)
         findings: list[str] = []
         if not suff["meets_agp_consensus"]:
@@ -782,13 +830,48 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
                 "| Metric | Value | Target |",
                 "|---|---|---|",
                 f"| TIR (70-180) | **{tir:.1f}%** | >70% (pediatric ADA) |",
+                f"| TITR (70-140) | {titr:.1f}% | (tight-range reference) |",
                 f"| TBR<70 | {tbr_70:.2f}% | <4% |",
                 f"| TBR<54 | **{tbr_54:.2f}%** | <1% |",
                 f"| TAR>180 | {tar_180:.1f}% | <25% |",
                 f"| TAR>250 | {tar_250:.1f}% | <5% |",
                 f"| Mean BG | {mean_bg:.1f} mg/dL ({mgdl_to_mmol(mean_bg):.1f} mmol/L) | — |",
-                f"| GMI | {gmi:.2f}% | <7% |",
+                f"| GMI | {gmi:.2f}% | <7% (individualize) |",
                 f"| CV | {cv:.1f}% | <36% |",
+                "",
+                "## Hypoglycemia events (consensus ≥15-min)",
+                "",
+                (
+                    f"- **{hypo.total_episodes}** events "
+                    f"({hypo.episodes_per_week}/week): "
+                    f"**{hypo.level2_episodes}** level-2 (<54), "
+                    f"{hypo.level1_episodes} level-1 (54-69), "
+                    f"{hypo.nocturnal_episodes} nocturnal"
+                ),
+                (
+                    f"- Mean duration {hypo.mean_duration_minutes} min; "
+                    f"{hypo.episodes_with_rescue_carbs} had a rescue carb logged"
+                ),
+                "",
+                "## Insulin & carbohydrate summary",
+                "",
+                f"- Mean daily **bolus** insulin: **{mean_daily_bolus:.1f} U** "
+                f"(basal not included — not a discrete treatment record)",
+                f"- Mean daily carbs: **{mean_daily_carbs:.0f} g** over {boluses_per_day:.1f} boluses/day",
+                "",
+                "## Ambulatory Glucose Profile (median + IQR band by hour)",
+                "",
+                "| Hour | n | p50 | Visual (p25-p75 IQR, 0-400 mg/dL) |",
+                "|---|---|---|---|",
+                *agp_lines,
+                "",
+                "`=` = IQR (p25-p75), `*` = median (p50); 10 mg/dL per char.",
+                "",
+                "## Daily profiles (local calendar day)",
+                "",
+                "| Date | n | Mean | TIR | Nadir |",
+                "|---|---|---|---|---|",
+                *day_lines,
                 "",
                 "## Risk indices",
                 "",
