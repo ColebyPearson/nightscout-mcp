@@ -86,6 +86,61 @@ def _sgv_to_pairs(readings: Iterable[Sgv]) -> list[tuple[datetime, float]]:
     return pairs
 
 
+CGM_READINGS_PER_DAY = 288  # 5-min cadence
+AGP_MIN_DAYS = 14  # Battelino 2019 consensus minimum window
+AGP_MIN_ACTIVE_PCT = 70.0  # Battelino 2019 consensus minimum sensor-active %
+
+
+def data_sufficiency(readings: Iterable[Sgv], days: int) -> dict[str, float | int | bool | str | None]:
+    """Assess whether a CGM window is adequate for consensus interpretation.
+
+    Battelino 2019 requires >=14 days at >=70% sensor-active time before AGP /
+    TIR-consensus metrics are interpretable. This returns the numbers a
+    clinician needs to judge that — and a `meets_agp_consensus` flag — so a
+    report built on 3 days of a warming-up sensor is flagged rather than
+    trusted. `pct_active` is capped at 100 (1-min uploaders exceed 288/day).
+    Gaps are non-random (warmup follows failure follows compression lows), so
+    the longest gap is surfaced explicitly.
+    """
+    pairs = _sgv_to_pairs(readings)
+    count = len(pairs)
+    expected = max(1, days) * CGM_READINGS_PER_DAY
+    pct_active = round(min(100.0, count / expected * 100), 1)
+
+    longest_gap_h = 0.0
+    for i in range(1, len(pairs)):
+        gap_h = (pairs[i][0] - pairs[i - 1][0]).total_seconds() / 3600
+        if gap_h > longest_gap_h:
+            longest_gap_h = gap_h
+
+    days_with_data = len({ts.strftime("%Y-%m-%d") for ts, _ in pairs})
+    meets = days >= AGP_MIN_DAYS and pct_active >= AGP_MIN_ACTIVE_PCT
+
+    note: str | None = None
+    if not meets:
+        reasons = []
+        if days < AGP_MIN_DAYS:
+            reasons.append(f"window is {days}d (<{AGP_MIN_DAYS}d)")
+        if pct_active < AGP_MIN_ACTIVE_PCT:
+            reasons.append(f"only {pct_active}% CGM-active (<{AGP_MIN_ACTIVE_PCT:.0f}%)")
+        note = (
+            "Below Battelino 2019 sufficiency for AGP/consensus metrics: "
+            + " and ".join(reasons)
+            + ". Treat percentiles and pass/fail verdicts as indicative only."
+        )
+
+    return {
+        "days_requested": days,
+        "days_with_data": days_with_data,
+        "reading_count": count,
+        "expected_readings": expected,
+        "pct_active": pct_active,
+        "longest_gap_hours": round(longest_gap_h, 1),
+        "meets_agp_consensus": meets,
+        "note": note,
+    }
+
+
 def wilson_ci_95(successes: int, total: int) -> tuple[float, float]:
     """Wilson score interval for binomial proportion at 95% confidence.
 

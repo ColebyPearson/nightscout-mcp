@@ -19,6 +19,7 @@ from nightscout_mcp.metrics import (
     conga,
     cusum_change_points,
     cv_percent,
+    data_sufficiency,
     exponential_iob_fraction,
     fit_dia_to_residuals,
     gmi_percent,
@@ -460,3 +461,58 @@ def test_fit_dia_recovers_known_dia_from_synthetic():
     result = fit_dia_to_residuals(observations)
     # Should recover something close to 5.0 (within grid spacing)
     assert abs(result["best_dia_hours"] - true_dia) <= 1.0
+
+
+# --- data_sufficiency --------------------------------------------------------
+
+
+def _suff_sgv(mgdl: int, ts: datetime):
+    from nightscout_mcp.models import Sgv
+
+    return Sgv.model_validate(
+        {
+            "sgv": mgdl,
+            "date": int(ts.timestamp() * 1000),
+            "dateString": ts.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+            "type": "sgv",
+        }
+    )
+
+
+def test_data_sufficiency_full_window_meets_consensus():
+    base = datetime(2026, 5, 1, 0, 0, tzinfo=UTC)
+    # 14 days at full 5-min cadence -> 100% active, meets consensus.
+    sgvs = [_suff_sgv(120, base + timedelta(minutes=5 * i)) for i in range(14 * 288)]
+    r = data_sufficiency(sgvs, days=14)
+    assert r["meets_agp_consensus"] is True
+    assert r["pct_active"] == 100.0
+    assert r["note"] is None
+
+
+def test_data_sufficiency_short_window_fails():
+    base = datetime(2026, 5, 1, 0, 0, tzinfo=UTC)
+    sgvs = [_suff_sgv(120, base + timedelta(minutes=5 * i)) for i in range(3 * 288)]
+    r = data_sufficiency(sgvs, days=3)
+    assert r["meets_agp_consensus"] is False
+    assert "3d" in r["note"]
+
+
+def test_data_sufficiency_low_coverage_fails_and_reports_gap():
+    base = datetime(2026, 5, 1, 0, 0, tzinfo=UTC)
+    # 14-day window but only ~30% coverage, with a 48h gap in the middle.
+    first = [_suff_sgv(120, base + timedelta(minutes=5 * i)) for i in range(500)]
+    resume = base + timedelta(days=7)
+    second = [_suff_sgv(120, resume + timedelta(minutes=5 * i)) for i in range(500)]
+    r = data_sufficiency(first + second, days=14)
+    assert r["meets_agp_consensus"] is False
+    assert r["pct_active"] < 70
+    assert r["longest_gap_hours"] > 24
+    assert "CGM-active" in r["note"]
+
+
+def test_data_sufficiency_caps_active_at_100_for_1min_cadence():
+    base = datetime(2026, 5, 1, 0, 0, tzinfo=UTC)
+    # 1-min cadence over 14 days -> 1440/day, well over 288 expected.
+    sgvs = [_suff_sgv(120, base + timedelta(minutes=i)) for i in range(14 * 1440)]
+    r = data_sufficiency(sgvs, days=14)
+    assert r["pct_active"] == 100.0

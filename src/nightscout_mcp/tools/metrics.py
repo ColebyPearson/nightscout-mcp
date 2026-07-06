@@ -39,6 +39,7 @@ from ..models import (
     ChangePointReport,
     ClinicPacket,
     ConsensusTargetAudit,
+    DataSufficiency,
     DiaFitResult,
     DynIsfRecommendation,
     GlucoseVariability,
@@ -151,6 +152,21 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
         )
 
     @mcp.tool()
+    async def data_sufficiency_report(days: int = 14) -> DataSufficiency:
+        """Is there enough CGM data for the metrics to be trustworthy?
+
+        Battelino 2019 requires >=14 days at >=70% sensor-active time before
+        AGP / TIR-consensus metrics are interpretable. Returns days-with-data,
+        % CGM-active, longest gap, and a `meets_agp_consensus` flag — call this
+        first when a report looks surprising, since sensor gaps are non-random
+        (warmup/failure) and bias metrics low.
+        """
+        client = get_client()
+        start, end = _window_for_days(days)
+        sgvs = await _fetch_sgvs_between(client, start, end)
+        return DataSufficiency(**M.data_sufficiency(sgvs, max(1, min(days, 90))))
+
+    @mcp.tool()
     async def bg_risk_indices(days: int = 14) -> BgRiskIndices:
         """LBGI / HBGI / ADRR per Kovatchev *Diabetes Care* 1998;21:1870 and 2006;29:2433.
 
@@ -201,9 +217,7 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
         pairs = M._sgv_to_pairs(sgvs)
 
         cv = M.cv_percent(values)
-        tir_70_180 = (
-            sum(1 for v in values if 70 <= v <= 180) / len(values) * 100 if values else 0.0
-        )
+        tir_70_180 = sum(1 for v in values if 70 <= v <= 180) / len(values) * 100 if values else 0.0
         tbr_lt70 = sum(1 for v in values if v < 70) / len(values) * 100 if values else 0.0
 
         return GlucoseVariability(
@@ -323,9 +337,7 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
         )
 
     @mcp.tool()
-    async def ambulatory_glucose_profile(
-        days: int = 14, timezone: str | None = None
-    ) -> AmbulatoryGlucoseProfile:
+    async def ambulatory_glucose_profile(days: int = 14, timezone: str | None = None) -> AmbulatoryGlucoseProfile:
         """AGP-style 5/25/50/75/95th percentile bands by hour-of-day.
 
         Reference: Battelino 2019 *Diabetes Care* 42:1593 AGP consensus.
@@ -409,11 +421,7 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
         by_time_band = _aggregate(events, lambda e: e.time_band)
 
         # Overall ratio across ALL events with both fields populated
-        with_both = [
-            e
-            for e in events
-            if e.realized_isf_mgdl_per_u and e.aaps_effective_isf_mgdl_per_u
-        ]
+        with_both = [e for e in events if e.realized_isf_mgdl_per_u and e.aaps_effective_isf_mgdl_per_u]
         if with_both:
             ratios = [
                 e.realized_isf_mgdl_per_u / e.aaps_effective_isf_mgdl_per_u
@@ -440,9 +448,7 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
     # ------------------------------------------------------------------------
 
     @mcp.tool()
-    async def change_points_bg(
-        days: int = 30, threshold_sigma: float = 4.0
-    ) -> ChangePointReport:
+    async def change_points_bg(days: int = 30, threshold_sigma: float = 4.0) -> ChangePointReport:
         """Detect change-points in hourly mean BG via CUSUM.
 
         A change-point is flagged where the cumulative deviation from the
@@ -482,9 +488,7 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
                     )
                 )
 
-        profile_changes = [
-            t.created_at for t in treatments if t.event_type == "Profile Switch" and t.created_at
-        ]
+        profile_changes = [t.created_at for t in treatments if t.event_type == "Profile Switch" and t.created_at]
         return ChangePointReport(
             signal="hourly_mean_bg",
             method="cusum",
@@ -496,9 +500,7 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
         )
 
     @mcp.tool()
-    async def change_points_tdd(
-        days: int = 30, threshold_sigma: float = 3.0
-    ) -> ChangePointReport:
+    async def change_points_tdd(days: int = 30, threshold_sigma: float = 3.0) -> ChangePointReport:
         """Detect change-points in daily total daily dose (TDD) via CUSUM.
 
         TDD shifts can signal puberty/growth, illness, pump-site issues,
@@ -544,9 +546,7 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
                     )
                 )
 
-        profile_changes = [
-            t.created_at for t in treatments if t.event_type == "Profile Switch" and t.created_at
-        ]
+        profile_changes = [t.created_at for t in treatments if t.event_type == "Profile Switch" and t.created_at]
         return ChangePointReport(
             signal="daily_tdd",
             method="cusum",
@@ -672,9 +672,7 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
             tir_p = sum(1 for v in vals if 70 <= v <= 180) / n_p * 100 if n_p else 0.0
             tbr_p = sum(1 for v in vals if v < 70) / n_p * 100 if n_p else 0.0
             mean_p = sum(vals) / n_p if n_p else 0.0
-            period_lines.append(
-                f"| {name:<10} | {n_p:6d} | {mean_p:6.1f} | {tir_p:6.1f}% | {tbr_p:6.1f}% |"
-            )
+            period_lines.append(f"| {name:<10} | {n_p:6d} | {mean_p:6.1f} | {tir_p:6.1f}% | {tbr_p:6.1f}% |")
 
         # Change-points
         hourly = M.hourly_aggregate(pairs)
@@ -683,12 +681,15 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
         cp_count = len(cps)
 
         # Profile changes in window
-        profile_changes = [
-            t.created_at for t in treatments if t.event_type == "Profile Switch" and t.created_at
-        ]
+        profile_changes = [t.created_at for t in treatments if t.event_type == "Profile Switch" and t.created_at]
+
+        # Data sufficiency — flag before any consensus-branded metric is trusted.
+        suff = M.data_sufficiency(sgvs, days)
 
         # Headline findings (priorities)
         findings: list[str] = []
+        if not suff["meets_agp_consensus"]:
+            findings.append(f"**Data sufficiency:** {suff['note']}")
         if tbr_54 > 1.0:
             findings.append(
                 f"**TBR<54 = {tbr_54:.2f}%** exceeds the ISPAD 2022 / Battelino 2019 "
@@ -697,17 +698,12 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
         lbgi_band_name = M.lbgi_band(lbgi)
         if lbgi_band_name in ("moderate", "high", "very_high"):
             findings.append(
-                f"**LBGI {lbgi:.2f}** is in the *{lbgi_band_name}* hypoglycemia-risk band "
-                f"(Kovatchev 1998)."
+                f"**LBGI {lbgi:.2f}** is in the *{lbgi_band_name}* hypoglycemia-risk band (Kovatchev 1998)."
             )
         if cv > M.CV_TARGET_PERCENT:
-            findings.append(
-                f"**CV {cv:.1f}%** exceeds the consensus target of <36% (Battelino 2019)."
-            )
+            findings.append(f"**CV {cv:.1f}%** exceeds the consensus target of <36% (Battelino 2019).")
         if tir < 70:
-            findings.append(
-                f"**TIR {tir:.1f}%** is below the ADA pediatric T1D target of >70%."
-            )
+            findings.append(f"**TIR {tir:.1f}%** is below the ADA pediatric T1D target of >70%.")
         if not findings:
             findings.append("No headline thresholds exceeded — current settings appear well-tuned.")
 
@@ -716,7 +712,11 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
             f"# Clinic packet — {days}-day report",
             "",
             f"- Window: `{start.date()}` -> `{end.date()}`",
-            f"- Total CGM readings: **{n}**",
+            (
+                f"- CGM coverage: **{suff['days_with_data']}** days with data, "
+                f"**{suff['pct_active']}%** active ({n} readings); "
+                f"longest gap {suff['longest_gap_hours']}h"
+            ),
             f"- Generated: `{datetime.now(UTC).isoformat()}`",
             "",
             "## Headline findings",
@@ -777,6 +777,7 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
             period_end_iso=end.isoformat(),
             markdown_body=markdown_body,
             headline_findings=findings,
+            data_sufficiency=DataSufficiency(**suff),
         )
 
     # ------------------------------------------------------------------------
@@ -817,16 +818,10 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
 
         events = _build_bolus_events(sgvs, treatments, devicestatus, dia_hours)
         by_bg_band = _aggregate(events, lambda e: e.bg_band)
-        with_isf = [
-            e for e in events
-            if e.realized_isf_mgdl_per_u and e.aaps_effective_isf_mgdl_per_u
-        ]
+        with_isf = [e for e in events if e.realized_isf_mgdl_per_u and e.aaps_effective_isf_mgdl_per_u]
         n = len(with_isf)
         if n > 0:
-            ratios = [
-                e.realized_isf_mgdl_per_u / e.aaps_effective_isf_mgdl_per_u
-                for e in with_isf
-            ]
+            ratios = [e.realized_isf_mgdl_per_u / e.aaps_effective_isf_mgdl_per_u for e in with_isf]
             overall = sum(ratios) / len(ratios)
         else:
             overall = 0.0
@@ -859,8 +854,10 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
         elif overall > 1.15:
             # Detect curve-dampening signature
             curve_signature = (
-                above_target_ratio is not None and above_target_ratio > 1.3 and
-                in_target_ratio is not None and 0.85 <= in_target_ratio <= 1.25
+                above_target_ratio is not None
+                and above_target_ratio > 1.3
+                and in_target_ratio is not None
+                and 0.85 <= in_target_ratio <= 1.25
             )
             if curve_signature:
                 recommendation_type = "dampen_curve"
@@ -967,8 +964,9 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
         checks: list[TargetCheck] = []
 
         # Helper
-        def _make_check(name: str, value: float, target_desc: str, in_target: bool,
-                        direction: str, severity: str, citation: str) -> TargetCheck:
+        def _make_check(
+            name: str, value: float, target_desc: str, in_target: bool, direction: str, severity: str, citation: str
+        ) -> TargetCheck:
             return TargetCheck(
                 metric_name=name,
                 metric_value=round(value, 3),
@@ -980,75 +978,125 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
             )
 
         # TIR (pediatric T1D ≥70 percent per ADA / ISPAD)
-        checks.append(_make_check(
-            "TIR (70-180 mg/dL)", tir, ">70% (pediatric ADA / ISPAD 2022)",
-            tir >= 70, "above_target" if tir >= 70 else "below_target",
-            "ok" if tir >= 70 else ("borderline" if tir >= 60 else "over"),
-            "ISPAD 2022 (Sherr/de Bock); Battelino 2019",
-        ))
+        checks.append(
+            _make_check(
+                "TIR (70-180 mg/dL)",
+                tir,
+                ">70% (pediatric ADA / ISPAD 2022)",
+                tir >= 70,
+                "above_target" if tir >= 70 else "below_target",
+                "ok" if tir >= 70 else ("borderline" if tir >= 60 else "over"),
+                "ISPAD 2022 (Sherr/de Bock); Battelino 2019",
+            )
+        )
         # TBR<54 (<1 percent per Battelino consensus)
-        checks.append(_make_check(
-            "TBR <54 mg/dL", tbr_54, "<1% (international consensus)",
-            tbr_54 < 1.0, "in_target" if tbr_54 < 1.0 else "above_target",
-            "ok" if tbr_54 < 1.0 else ("borderline" if tbr_54 < 2.0 else "severe"),
-            "Battelino 2019 Diabetes Care 42:1593",
-        ))
+        checks.append(
+            _make_check(
+                "TBR <54 mg/dL",
+                tbr_54,
+                "<1% (international consensus)",
+                tbr_54 < 1.0,
+                "in_target" if tbr_54 < 1.0 else "above_target",
+                "ok" if tbr_54 < 1.0 else ("borderline" if tbr_54 < 2.0 else "severe"),
+                "Battelino 2019 Diabetes Care 42:1593",
+            )
+        )
         # TBR<70 (<4 percent per consensus)
-        checks.append(_make_check(
-            "TBR <70 mg/dL", tbr_70, "<4% (Battelino 2019)",
-            tbr_70 < 4.0, "in_target" if tbr_70 < 4.0 else "above_target",
-            "ok" if tbr_70 < 4.0 else ("borderline" if tbr_70 < 7.0 else "over"),
-            "Battelino 2019",
-        ))
+        checks.append(
+            _make_check(
+                "TBR <70 mg/dL",
+                tbr_70,
+                "<4% (Battelino 2019)",
+                tbr_70 < 4.0,
+                "in_target" if tbr_70 < 4.0 else "above_target",
+                "ok" if tbr_70 < 4.0 else ("borderline" if tbr_70 < 7.0 else "over"),
+                "Battelino 2019",
+            )
+        )
         # TAR>180 (<25 percent)
-        checks.append(_make_check(
-            "TAR >180 mg/dL", tar_180, "<25% (Battelino 2019)",
-            tar_180 < 25.0, "in_target" if tar_180 < 25.0 else "above_target",
-            "ok" if tar_180 < 25.0 else ("borderline" if tar_180 < 40.0 else "over"),
-            "Battelino 2019",
-        ))
+        checks.append(
+            _make_check(
+                "TAR >180 mg/dL",
+                tar_180,
+                "<25% (Battelino 2019)",
+                tar_180 < 25.0,
+                "in_target" if tar_180 < 25.0 else "above_target",
+                "ok" if tar_180 < 25.0 else ("borderline" if tar_180 < 40.0 else "over"),
+                "Battelino 2019",
+            )
+        )
         # TAR>250 (<5 percent)
-        checks.append(_make_check(
-            "TAR >250 mg/dL", tar_250, "<5% (Battelino 2019)",
-            tar_250 < 5.0, "in_target" if tar_250 < 5.0 else "above_target",
-            "ok" if tar_250 < 5.0 else ("borderline" if tar_250 < 10.0 else "over"),
-            "Battelino 2019",
-        ))
+        checks.append(
+            _make_check(
+                "TAR >250 mg/dL",
+                tar_250,
+                "<5% (Battelino 2019)",
+                tar_250 < 5.0,
+                "in_target" if tar_250 < 5.0 else "above_target",
+                "ok" if tar_250 < 5.0 else ("borderline" if tar_250 < 10.0 else "over"),
+                "Battelino 2019",
+            )
+        )
         # CV (<36 percent)
-        checks.append(_make_check(
-            "CV", cv, "<36% (Battelino 2019)",
-            cv < 36.0, "in_target" if cv < 36.0 else "above_target",
-            "ok" if cv < 36.0 else ("borderline" if cv < 42.0 else "over"),
-            "Battelino 2019; Monnier 2008",
-        ))
+        checks.append(
+            _make_check(
+                "CV",
+                cv,
+                "<36% (Battelino 2019)",
+                cv < 36.0,
+                "in_target" if cv < 36.0 else "above_target",
+                "ok" if cv < 36.0 else ("borderline" if cv < 42.0 else "over"),
+                "Battelino 2019; Monnier 2008",
+            )
+        )
         # GMI (no fixed target — surfaced for reference vs. HbA1c)
-        checks.append(_make_check(
-            "GMI", gmi, "<7% (target proxy)",
-            gmi < 7.0, "in_target" if gmi < 7.0 else "above_target",
-            "ok" if gmi < 7.0 else ("borderline" if gmi < 8.0 else "over"),
-            "Bergenstal 2018 Diabetes Care 41:2275",
-        ))
+        checks.append(
+            _make_check(
+                "GMI",
+                gmi,
+                "<7% (target proxy)",
+                gmi < 7.0,
+                "in_target" if gmi < 7.0 else "above_target",
+                "ok" if gmi < 7.0 else ("borderline" if gmi < 8.0 else "over"),
+                "Bergenstal 2018 Diabetes Care 41:2275",
+            )
+        )
         # LBGI (<2.5 = low/moderate)
-        checks.append(_make_check(
-            "LBGI", lbgi, "<2.5 (low/moderate hypo risk)",
-            lbgi < 2.5, "in_target" if lbgi < 2.5 else "above_target",
-            "ok" if lbgi < 2.5 else ("borderline" if lbgi < 5.0 else "severe"),
-            "Kovatchev 1998 Diabetes Care 21:1870",
-        ))
+        checks.append(
+            _make_check(
+                "LBGI",
+                lbgi,
+                "<2.5 (low/moderate hypo risk)",
+                lbgi < 2.5,
+                "in_target" if lbgi < 2.5 else "above_target",
+                "ok" if lbgi < 2.5 else ("borderline" if lbgi < 5.0 else "severe"),
+                "Kovatchev 1998 Diabetes Care 21:1870",
+            )
+        )
         # HBGI (<9 = low/moderate)
-        checks.append(_make_check(
-            "HBGI", hbgi, "<9.0 (low/moderate hyper risk)",
-            hbgi < 9.0, "in_target" if hbgi < 9.0 else "above_target",
-            "ok" if hbgi < 9.0 else ("borderline" if hbgi < 15.0 else "severe"),
-            "Kovatchev 1998 Diabetes Care 21:1870",
-        ))
+        checks.append(
+            _make_check(
+                "HBGI",
+                hbgi,
+                "<9.0 (low/moderate hyper risk)",
+                hbgi < 9.0,
+                "in_target" if hbgi < 9.0 else "above_target",
+                "ok" if hbgi < 9.0 else ("borderline" if hbgi < 15.0 else "severe"),
+                "Kovatchev 1998 Diabetes Care 21:1870",
+            )
+        )
         # GRI (no formal target threshold; Klonoff suggests <50 = good control)
-        checks.append(_make_check(
-            "GRI", gri_data["gri"], "<50 (suggested good control)",
-            gri_data["gri"] < 50.0, "in_target" if gri_data["gri"] < 50.0 else "above_target",
-            "ok" if gri_data["gri"] < 50.0 else ("borderline" if gri_data["gri"] < 70.0 else "over"),
-            "Klonoff 2023 JDST 17:1226",
-        ))
+        checks.append(
+            _make_check(
+                "GRI",
+                gri_data["gri"],
+                "<50 (suggested good control)",
+                gri_data["gri"] < 50.0,
+                "in_target" if gri_data["gri"] < 50.0 else "above_target",
+                "ok" if gri_data["gri"] < 50.0 else ("borderline" if gri_data["gri"] < 70.0 else "over"),
+                "Klonoff 2023 JDST 17:1226",
+            )
+        )
 
         passed = sum(1 for c in checks if c.in_target)
         failed = sum(1 for c in checks if not c.in_target)
@@ -1072,9 +1120,7 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
         )
 
     @mcp.tool()
-    async def settings_change_attribution(
-        days: int = 30, pre_post_days: int = 7
-    ) -> SettingChangeAttributionReport:
+    async def settings_change_attribution(days: int = 30, pre_post_days: int = 7) -> SettingChangeAttributionReport:
         """For each profile-switch event in the window, compute pre vs. post outcome shift.
 
         Methodology:
@@ -1101,10 +1147,7 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
         treatments = await _fetch_treatments_between(client, start, end)
 
         # Find profile switch events
-        switches: list[Treatment] = [
-            t for t in treatments
-            if t.event_type == "Profile Switch" and t.created_at
-        ]
+        switches: list[Treatment] = [t for t in treatments if t.event_type == "Profile Switch" and t.created_at]
         if not switches:
             return SettingChangeAttributionReport(
                 window_days=days,
@@ -1135,17 +1178,21 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
             post_metrics = _compute_change_window_metrics(post_vals)
             # Binomial proportion p (two-proportion z-test approximation)
             p = _two_proportion_p_value(
-                int(pre_metrics["in_range_count"]), len(pre_vals),
-                int(post_metrics["in_range_count"]), len(post_vals),
+                int(pre_metrics["in_range_count"]),
+                len(pre_vals),
+                int(post_metrics["in_range_count"]),
+                len(post_vals),
             )
-            raw_events.append((
-                sw,
-                {
-                    "pre": pre_metrics,
-                    "post": post_metrics,
-                    "p_value": p,
-                }
-            ))
+            raw_events.append(
+                (
+                    sw,
+                    {
+                        "pre": pre_metrics,
+                        "post": post_metrics,
+                        "p_value": p,
+                    },
+                )
+            )
 
         # FDR correction (Benjamini-Hochberg)
         p_values = [data["p_value"] for _, data in raw_events]
@@ -1162,25 +1209,27 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
                 sig_band = "borderline"
             else:
                 sig_band = "not_significant"
-            change_events.append(SettingChangeAttribution(
-                change_timestamp_iso=sw.created_at,
-                profile_name=getattr(sw, "profile", None),
-                percentage=int(sw.percent) if sw.percent else None,
-                pre_window_days=pre_post_days,
-                post_window_days=pre_post_days,
-                pre_tir_pct=round(pre["tir_pct"], 2),
-                post_tir_pct=round(post["tir_pct"], 2),
-                delta_tir_pct=round(post["tir_pct"] - pre["tir_pct"], 2),
-                pre_tbr_lt54_pct=round(pre["tbr_lt54_pct"], 2),
-                post_tbr_lt54_pct=round(post["tbr_lt54_pct"], 2),
-                delta_tbr_lt54_pct=round(post["tbr_lt54_pct"] - pre["tbr_lt54_pct"], 2),
-                pre_gri=round(pre["gri"], 2),
-                post_gri=round(post["gri"], 2),
-                delta_gri=round(post["gri"] - pre["gri"], 2),
-                binomial_p_value_uncorrected=round(data["p_value"], 4),
-                binomial_p_value_fdr_corrected=round(p_corr, 4),
-                significance_band=sig_band,
-            ))
+            change_events.append(
+                SettingChangeAttribution(
+                    change_timestamp_iso=sw.created_at,
+                    profile_name=getattr(sw, "profile", None),
+                    percentage=int(sw.percent) if sw.percent else None,
+                    pre_window_days=pre_post_days,
+                    post_window_days=pre_post_days,
+                    pre_tir_pct=round(pre["tir_pct"], 2),
+                    post_tir_pct=round(post["tir_pct"], 2),
+                    delta_tir_pct=round(post["tir_pct"] - pre["tir_pct"], 2),
+                    pre_tbr_lt54_pct=round(pre["tbr_lt54_pct"], 2),
+                    post_tbr_lt54_pct=round(post["tbr_lt54_pct"], 2),
+                    delta_tbr_lt54_pct=round(post["tbr_lt54_pct"] - pre["tbr_lt54_pct"], 2),
+                    pre_gri=round(pre["gri"], 2),
+                    post_gri=round(post["gri"], 2),
+                    delta_gri=round(post["gri"] - pre["gri"], 2),
+                    binomial_p_value_uncorrected=round(data["p_value"], 4),
+                    binomial_p_value_fdr_corrected=round(p_corr, 4),
+                    significance_band=sig_band,
+                )
+            )
 
         return SettingChangeAttributionReport(
             window_days=days,
@@ -1204,6 +1253,7 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
         start, end = _window_for_days(days)
         sgvs = await _fetch_sgvs_between(client, start, end)
         pairs = M._sgv_to_pairs(sgvs)
+        suff = M.data_sufficiency(sgvs, days)
         hourly = M.agp_hourly_percentiles(pairs, tz_offset_hours=tz_offset_hours)
 
         # Determine p50 min/max for the headline
@@ -1221,6 +1271,11 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
         lines = [
             f"# Ambulatory Glucose Profile — {days}-day window",
             "",
+        ]
+        if not suff["meets_agp_consensus"]:
+            lines.append(f"> ⚠️ **{suff['note']}**")
+            lines.append("")
+        lines += [
             f"- Timezone: `{tz_name or 'UTC'}`",
             f"- Median (p50) ranges from **{p50_min:.0f}** mg/dL (hour {p50_min_hour:02d}) "
             f"to **{p50_max:.0f}** mg/dL (hour {p50_max_hour:02d})",
@@ -1239,23 +1294,21 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
             # Scale: 0-400 mg/dL maps to 40 chars
             iqr_start = int(min(40, max(0, p25 / 10)))
             iqr_end = int(min(40, max(0, p75 / 10)))
-            bar = (
-                " " * iqr_start +
-                "=" * max(1, iqr_end - iqr_start) +
-                " " * max(0, 40 - iqr_end)
-            )
+            bar = " " * iqr_start + "=" * max(1, iqr_end - iqr_start) + " " * max(0, 40 - iqr_end)
             # Mark p50 position with `*` if visible
             p50_pos = int(min(40, max(0, p50 / 10)))
-            bar = bar[:p50_pos] + "*" + bar[p50_pos + 1:]
+            bar = bar[:p50_pos] + "*" + bar[p50_pos + 1 :]
             lines.append(
                 f"| {int(h['hour']):02d} | {n:4d} | {p05:5.0f} | {p25:5.0f} | "
                 f"**{p50:5.0f}** | {p75:5.0f} | {p95:5.0f} | `{bar}` |"
             )
-        lines.extend([
-            "",
-            "Scale: each visual is 0-400 mg/dL across 40 chars (10 mg/dL per char). "
-            "`=` = IQR (p25 to p75), `*` = median (p50).",
-        ])
+        lines.extend(
+            [
+                "",
+                "Scale: each visual is 0-400 mg/dL across 40 chars (10 mg/dL per char). "
+                "`=` = IQR (p25 to p75), `*` = median (p50).",
+            ]
+        )
         markdown_body = "\n".join(lines)
 
         return AgpMarkdownRender(
@@ -1266,6 +1319,7 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
             p50_max_mgdl=round(p50_max, 1),
             p50_min_hour=p50_min_hour,
             p50_max_hour=p50_max_hour,
+            data_sufficiency=DataSufficiency(**suff),
         )
 
     @mcp.tool()
@@ -1305,18 +1359,13 @@ def register(mcp: Any, get_client: Callable[[], NightscoutClient]) -> None:
 
         if (a_end - a_start) != (b_end - b_start):
             raise ValueError(
-                "time_period_compare requires equal-length windows; "
-                f"got A={a_end - a_start}, B={b_end - b_start}."
+                f"time_period_compare requires equal-length windows; got A={a_end - a_start}, B={b_end - b_start}."
             )
 
         sgvs_a = await _fetch_sgvs_between(client, a_start, a_end)
         sgvs_b = await _fetch_sgvs_between(client, b_start, b_end)
-        period_a = _build_period_metrics(
-            period_a_label, a_start, a_end, M._sgv_to_mgdl_list(sgvs_a)
-        )
-        period_b = _build_period_metrics(
-            period_b_label, b_start, b_end, M._sgv_to_mgdl_list(sgvs_b)
-        )
+        period_a = _build_period_metrics(period_a_label, a_start, a_end, M._sgv_to_mgdl_list(sgvs_a))
+        period_b = _build_period_metrics(period_b_label, b_start, b_end, M._sgv_to_mgdl_list(sgvs_b))
 
         # Check CI overlap
         tir_overlap = _ci_overlap(period_a.tir_70_180_ci, period_b.tir_70_180_ci)
@@ -1489,12 +1538,8 @@ def _build_bolus_events(
                 pre_bg_mmol=mgdl_to_mmol(pre_bg) if pre_bg else None,
                 iob_at_bolus=float(iob) if iob is not None else None,
                 cob_at_bolus=float(cob) if cob is not None else None,
-                aaps_predicted_eventual_bg_mgdl=float(aaps_predicted)
-                if aaps_predicted is not None
-                else None,
-                aaps_effective_isf_mgdl_per_u=float(aaps_eff_isf)
-                if aaps_eff_isf is not None
-                else None,
+                aaps_predicted_eventual_bg_mgdl=float(aaps_predicted) if aaps_predicted is not None else None,
+                aaps_effective_isf_mgdl_per_u=float(aaps_eff_isf) if aaps_eff_isf is not None else None,
                 realized_5h_min_bg_mgdl=realized_min,
                 realized_5h_drop_mgdl=drop,
                 realized_isf_mgdl_per_u=realized_isf,
@@ -1506,9 +1551,7 @@ def _build_bolus_events(
     return events
 
 
-def _aggregate(
-    events: list[BolusEvent], key_fn: Callable[[BolusEvent], str]
-) -> list[BolusBandAggregate]:
+def _aggregate(events: list[BolusEvent], key_fn: Callable[[BolusEvent], str]) -> list[BolusBandAggregate]:
     """Aggregate bolus events into per-band statistics."""
     by_band: dict[str, list[BolusEvent]] = {}
     for e in events:
@@ -1550,20 +1593,17 @@ def _interpret_isf_ratio(overall: float, by_bg_band: list[BolusBandAggregate]) -
     if overall == 0:
         return "Not enough matched events to compute a meaningful ratio."
     # Get above-target vs in-target ratios for curve-vs-uniform distinction
-    above = next(
-        (b for b in by_bg_band if b.band_name in ("180_250", "over_250")), None
-    )
-    in_target = next(
-        (b for b in by_bg_band if b.band_name in ("100_140", "140_180")), None
-    )
+    above = next((b for b in by_bg_band if b.band_name in ("180_250", "over_250")), None)
+    in_target = next((b for b in by_bg_band if b.band_name in ("100_140", "140_180")), None)
     if 0.85 <= overall <= 1.15:
-        return (
-            f"AAPS Dynamic ISF is well-calibrated (overall ratio {overall:.2f}, "
-            f"within +/-15% of 1.0)."
-        )
+        return f"AAPS Dynamic ISF is well-calibrated (overall ratio {overall:.2f}, within +/-15% of 1.0)."
     if overall > 1.15:
-        if above and in_target and above.isf_ratio_realized_vs_effective > 1.3 and \
-           0.85 <= in_target.isf_ratio_realized_vs_effective <= 1.15:
+        if (
+            above
+            and in_target
+            and above.isf_ratio_realized_vs_effective > 1.3
+            and 0.85 <= in_target.isf_ratio_realized_vs_effective <= 1.15
+        ):
             return (
                 f"AAPS over-dosing above target (above-target ratio "
                 f"{above.isf_ratio_realized_vs_effective:.2f} vs in-target "
@@ -1583,9 +1623,7 @@ def _interpret_isf_ratio(overall: float, by_bg_band: list[BolusBandAggregate]) -
     return f"Overall ratio {overall:.2f}; review per-band breakdown."
 
 
-def _build_iob_observations(
-    sgvs: list[Sgv], treatments: list[Treatment]
-) -> list[tuple[float, float, float]]:
+def _build_iob_observations(sgvs: list[Sgv], treatments: list[Treatment]) -> list[tuple[float, float, float]]:
     """Build (t_min, predicted_iob_fraction, observed_iob_fraction) tuples for fitting.
 
     For each isolated correction bolus, sample remaining-effect at multiple
@@ -1685,6 +1723,7 @@ async def _read_current_dynisf_adjust(client: NightscoutClient) -> int:
     ships.
     """
     import os
+
     try:
         return int(os.environ.get("AAPS_DYNISF_ADJUST", "100"))
     except (ValueError, TypeError):
