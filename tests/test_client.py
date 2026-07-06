@@ -24,9 +24,7 @@ def settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
 @respx.mock
 async def test_status_injects_token(settings: Settings) -> None:
     route = respx.get("https://example.nightscout.test/api/v1/status.json").mock(
-        return_value=httpx.Response(
-            200, json={"version": "15.0.7", "status": "ok", "settings": {"units": "mmol"}}
-        )
+        return_value=httpx.Response(200, json={"version": "15.0.7", "status": "ok", "settings": {"units": "mmol"}})
     )
     client = NightscoutClient(settings)
     try:
@@ -42,16 +40,47 @@ async def test_status_injects_token(settings: Settings) -> None:
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_get_raises_on_4xx(settings: Settings) -> None:
+async def test_get_raises_sanitized_error_on_4xx(settings: Settings) -> None:
+    """A failed request must raise a token-free error.
+
+    httpx.HTTPStatusError embeds the full request URL (incl. ?token=...) in its
+    message, and FastMCP surfaces str(exc) back to the LLM on tool failure. The
+    client must catch and re-raise without the token or the raw URL.
+    """
     respx.get("https://example.nightscout.test/api/v1/entries.json").mock(
         return_value=httpx.Response(401, json={"status": 401, "message": "Unauthorized"})
     )
     client = NightscoutClient(settings)
     try:
-        with pytest.raises(httpx.HTTPStatusError):
+        with pytest.raises(RuntimeError) as excinfo:
             await client.get("/api/v1/entries.json")
     finally:
         await client.aclose()
+
+    msg = str(excinfo.value)
+    assert "mcp-reader-abc12345" not in msg  # token must never leak
+    assert "token" not in msg
+    assert "401" in msg
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_raises_sanitized_error_on_transport_failure(
+    settings: Settings,
+) -> None:
+    """Connect/timeout errors must also be sanitized — httpx can stringify the
+    URL (with token) in RequestError messages too."""
+    respx.get("https://example.nightscout.test/api/v1/entries.json").mock(side_effect=httpx.ConnectTimeout("timed out"))
+    client = NightscoutClient(settings)
+    try:
+        with pytest.raises(RuntimeError) as excinfo:
+            await client.get("/api/v1/entries.json")
+    finally:
+        await client.aclose()
+
+    msg = str(excinfo.value)
+    assert "mcp-reader-abc12345" not in msg
+    assert "token" not in msg
 
 
 def test_client_construction_attaches_scrub_filter_to_httpx_logger(

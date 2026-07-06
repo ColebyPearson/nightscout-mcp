@@ -45,9 +45,7 @@ class NightscoutClient:
         self._http = httpx.AsyncClient(
             base_url=settings.base_url,
             timeout=_DEFAULT_TIMEOUT,
-            headers={
-                "User-Agent": "nightscout-mcp/0.2.0 (+https://github.com/ColebyPearson/nightscout-mcp)"
-            },
+            headers={"User-Agent": "nightscout-mcp/0.2.0 (+https://github.com/ColebyPearson/nightscout-mcp)"},
         )
 
     @property
@@ -67,9 +65,20 @@ class NightscoutClient:
         merged: dict[str, Any] = {"token": self._settings.nightscout_token}
         if params:
             merged.update(params)
-        resp = await self._http.get(path, params=merged)
-        resp.raise_for_status()
-        return resp.json()
+        try:
+            resp = await self._http.get(path, params=merged)
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPStatusError as exc:
+            # httpx embeds the full request URL — including ?token=... — in the
+            # exception message. FastMCP surfaces str(exc) back to the LLM on a
+            # failed tool call, so re-raise with the path only. Never include
+            # exc, resp.url, or the params here.
+            raise RuntimeError(f"Nightscout returned HTTP {exc.response.status_code} for {path}") from None
+        except httpx.RequestError as exc:
+            # Connect/timeout/transport errors also stringify the URL with the
+            # token in some httpx paths. Report the error class and path only.
+            raise RuntimeError(f"Nightscout request failed for {path}: {type(exc).__name__}") from None
 
     async def status(self) -> dict[str, Any]:
         """Probe /api/v1/status.json — used as a connectivity smoke test."""

@@ -77,8 +77,7 @@ def daily_report(
     notes = [
         t.notes
         for t in treatments
-        if t.notes
-        and t.event_type not in ("Profile Switch", "Temporary Override", "Temp Basal")
+        if t.notes and t.event_type not in ("Profile Switch", "Temporary Override", "Temp Basal")
     ]
     return DailyReport(
         date=date_str,
@@ -280,9 +279,7 @@ def overnight_analysis(date_iso: str, readings: list[Sgv]) -> OvernightAnalysis:
     )
 
 
-def detect_patterns(
-    days: int, daily_groups: list[tuple[str, list[Sgv]]]
-) -> DetectedPatterns:
+def detect_patterns(days: int, daily_groups: list[tuple[str, list[Sgv]]]) -> DetectedPatterns:
     """Detect recurring patterns across multiple days.
 
     `daily_groups` is a list of (date_str, readings_for_that_day) tuples.
@@ -401,7 +398,8 @@ def insulin_sensitivity_check(
 
         # Exclude if any carb entry within ±60 min
         ate_nearby = any(
-            other.carbs and other.carbs > 0
+            other.carbs
+            and other.carbs > 0
             and abs((parse_iso_to_utc(other.created_at) - tx_time).total_seconds()) <= 3600
             for other in treatments
             if other.created_at != tx.created_at
@@ -457,19 +455,30 @@ def insulin_sensitivity_check(
     else:
         confidence = "high"
 
+    # ISF is mg/dL dropped per unit; a correction dose is (BG - target) / ISF.
+    # A HIGHER ISF number therefore yields a SMALLER dose. So when the derived
+    # (real-world) ISF exceeds the profile's, each unit is dropping BG more than
+    # the profile assumes -> the profile ISF is set too low -> corrections are
+    # over-dosed -> hypo. The safe correction is to RAISE the profile ISF, not
+    # lower it. (See effective_isf_check, which resolves the identical signal
+    # the same direction: over-dosing -> larger effective ISF.)
+    safety = " This is advisory only. Do not change AAPS/pump settings without consulting your healthcare provider."
     ratio = (derived_mmol / profile_isf_mmol) if profile_isf_mmol else None
     if ratio is None:
         recommendation = "No profile ISF available to compare against."
     elif ratio > 1.15:
         recommendation = (
             "Derived ISF suggests you're MORE sensitive than your profile says "
-            "(each unit drops you further). Consider lowering profile ISF or "
-            "reviewing for overcorrections."
+            "(each unit drops you further), so corrections may be over-dosing "
+            "and driving lows. Consider RAISING profile ISF (a higher ISF number "
+            "means smaller correction doses)." + safety
         )
     elif ratio < 0.85:
         recommendation = (
             "Derived ISF suggests you're LESS sensitive than your profile says "
-            "(each unit drops you less). Consider raising profile ISF."
+            "(each unit drops you less), so corrections may be under-dosing. "
+            "Consider LOWERING profile ISF (a lower ISF number means larger "
+            "correction doses)." + safety
         )
     else:
         recommendation = "Derived ISF is consistent with your profile (within ±15%)."
@@ -599,9 +608,7 @@ def effective_isf_check(
         except Exception:
             continue
         # No carb entry within ±60 min
-        ate_nearby = any(
-            abs((c - tx_time).total_seconds()) <= 3600 for c in carb_times
-        )
+        ate_nearby = any(abs((c - tx_time).total_seconds()) <= 3600 for c in carb_times)
         if ate_nearby:
             continue
 
@@ -704,18 +711,14 @@ def effective_isf_check(
 
     overall_eff = statistics.fmean(all_effective) if all_effective else None
     overall_rea = statistics.fmean(all_realized) if all_realized else None
-    overall_ratio = (
-        (overall_rea / overall_eff) if overall_eff and overall_rea else None
-    )
+    overall_ratio = (overall_rea / overall_eff) if overall_eff and overall_rea else None
 
     # Recommendation
     safety = " These signals are advisory. Do not change AAPS settings without consulting your healthcare provider."
 
     if sample_count == 0:
         # Distinguish "no devicestatus" from "AAPS rows present but no sens"
-        any_sens = any(
-            _ds_sens_mmol(ds, profile_units) is not None for ds in devicestatuses
-        )
+        any_sens = any(_ds_sens_mmol(ds, profile_units) is not None for ds in devicestatuses)
         if len(devicestatuses) == 0:
             rec = (
                 "No devicestatus rows in the lookback window. This tool requires "
@@ -750,9 +753,7 @@ def effective_isf_check(
         )
 
     # Build per-band ratio map for the divergent-band check
-    band_ratios: dict[str, float | None] = {
-        b.band_label: b.ratio_realized_over_effective for b in by_bg_band
-    }
+    band_ratios: dict[str, float | None] = {b.band_label: b.ratio_realized_over_effective for b in by_bg_band}
     in_target = band_ratios.get("in_target")
     above_target = band_ratios.get("above_target")
     below_target = band_ratios.get("below_target")
@@ -783,19 +784,13 @@ def effective_isf_check(
 
     # Detect BG-curve divergence: in-target tracks well but a tails band runs hot/cold.
     curve_note = ""
-    if (
-        in_target is not None and 0.85 <= in_target <= 1.15
-        and above_target is not None and above_target > 1.15
-    ):
+    if in_target is not None and 0.85 <= in_target <= 1.15 and above_target is not None and above_target > 1.15:
         curve_note = (
             f" However, in-target tracks well ({in_target:.2f}) while above-target runs "
             f"hot ({above_target:.2f}) — this is a BG-curve calibration issue (the "
             "BG-dependent dampening parameter), not an Adjustment Factor issue."
         )
-    elif (
-        in_target is not None and 0.85 <= in_target <= 1.15
-        and below_target is not None and below_target > 1.15
-    ):
+    elif in_target is not None and 0.85 <= in_target <= 1.15 and below_target is not None and below_target > 1.15:
         curve_note = (
             f" However, in-target tracks well ({in_target:.2f}) while below-target runs "
             f"hot ({below_target:.2f}) — note that hypo-treatment carbs may be polluting "
@@ -881,11 +876,7 @@ def carb_ratio_check(
     residuals: list[float] = []
 
     # Pre-collect carb-bearing meal timestamps for forward-contamination check
-    other_carb_times = [
-        parse_iso_to_utc(t.created_at)
-        for t in treatments
-        if t.carbs and t.carbs > 5
-    ]
+    other_carb_times = [parse_iso_to_utc(t.created_at) for t in treatments if t.carbs and t.carbs > 5]
 
     for tx_time, carbs_g, insulin_u in paired:
         end_window = tx_time + timedelta(hours=4)
@@ -894,9 +885,7 @@ def carb_ratio_check(
         # tx_time; we don't penalize for them. Symmetric exclusion was
         # empirically too strict for typical 3-4 meals/day users.
         contaminated = any(
-            tx_time < other_time <= end_window
-            for other_time in other_carb_times
-            if other_time != tx_time
+            tx_time < other_time <= end_window for other_time in other_carb_times if other_time != tx_time
         )
         if contaminated:
             continue
@@ -1041,10 +1030,7 @@ def compression_low_analysis(
             continue
         drop_minutes = max(
             1,
-            int(
-                (parse_iso_to_utc(min_r.date_iso) - parse_iso_to_utc(start.date_iso)).total_seconds()
-                // 60
-            ),
+            int((parse_iso_to_utc(min_r.date_iso) - parse_iso_to_utc(start.date_iso)).total_seconds() // 60),
         )
         drop_rate = drop / drop_minutes
         if drop_rate < COMPRESSION_DROP_MGDL_PER_MIN:
@@ -1059,10 +1045,7 @@ def compression_low_analysis(
         rise = recovery_r.sgv_mgdl - min_r.sgv_mgdl
         recovery_minutes = max(
             1,
-            int(
-                (parse_iso_to_utc(recovery_r.date_iso) - parse_iso_to_utc(min_r.date_iso)).total_seconds()
-                // 60
-            ),
+            int((parse_iso_to_utc(recovery_r.date_iso) - parse_iso_to_utc(min_r.date_iso)).total_seconds() // 60),
         )
         recovery_rate = rise / recovery_minutes
         total_duration = drop_minutes + recovery_minutes
