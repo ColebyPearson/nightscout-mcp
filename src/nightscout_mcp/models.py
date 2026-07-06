@@ -812,6 +812,23 @@ class DiaFitResult(BaseModel):
     caveat_text: str
 
 
+class DataSufficiency(BaseModel):
+    """CGM data-adequacy summary (Battelino 2019: >=14d at >=70% active).
+
+    Attached to consensus-branded reports so an under-sampled window is flagged
+    rather than trusted. `note` is populated only when the window falls short.
+    """
+
+    days_requested: int
+    days_with_data: int
+    reading_count: int
+    expected_readings: int
+    pct_active: float
+    longest_gap_hours: float
+    meets_agp_consensus: bool
+    note: str | None = None
+
+
 class ClinicPacket(BaseModel):
     """Composite 30-day clinic-ready report.
 
@@ -824,6 +841,7 @@ class ClinicPacket(BaseModel):
     period_end_iso: str
     markdown_body: str
     headline_findings: list[str]
+    data_sufficiency: DataSufficiency | None = None
 
 
 # --- Composition / recommendation tools (PR #C) -----------------------------
@@ -916,6 +934,7 @@ class AgpMarkdownRender(BaseModel):
     p50_max_mgdl: float
     p50_min_hour: int
     p50_max_hour: int
+    data_sufficiency: DataSufficiency | None = None
 
 
 class PeriodMetrics(BaseModel):

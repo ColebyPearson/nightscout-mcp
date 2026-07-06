@@ -56,6 +56,7 @@ Canonical CGM metrics from the clinical literature, computed from existing Night
 | `bg_risk_indices` | LBGI / HBGI / ADRR with risk bands | Kovatchev *Diabetes Care* 1998;21:1870 + 2006;29:2433 |
 | `glucose_variability_metrics` | MAGE, MODD, J-index, M-value, GVP, CONGA-{1h,2h,4h}, COGI, CV | Service 1970, Molnar 1972, Schlichtkrull 1965, McDonnell 2005, Peyser 2018, Leelarathna 2020 |
 | `time_in_range_with_ci` | TIR / TBR / TAR with Wilson binomial 95 % CIs per band | Battelino *Diabetes Care* 2019;42:1593 |
+| `data_sufficiency_report` | Days-with-data / % CGM-active / longest gap + `meets_agp_consensus` flag (≥14 d, ≥70 % active) | Battelino *Diabetes Care* 2019;42:1593 |
 | `per_meal_period_tir` | TIR by breakfast / lunch / dinner / overnight / afternoon / evening | (composition) |
 | `ambulatory_glucose_profile` | AGP-style 5/25/50/75/95th percentile bands by hour-of-day | Battelino 2019 AGP consensus |
 | `bolus_event_residuals` | Per-bolus realized-vs-AAPS-predicted ISF, stratified by BG band + time-of-day | (composition of the above + devicestatus) |
