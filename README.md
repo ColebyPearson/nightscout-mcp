@@ -13,7 +13,7 @@ This tool reads CGM data and surfaces it to an LLM. **It is not a medical device
 
 ## What you get
 
-**41 read-only MCP tools** spanning live data, history, and analytics. The LLM can ask things like *"What's my current BG and how much insulin is on board?"* or *"Has the dawn phenomenon hit me on more than half the mornings this week?"* and get back structured answers backed by real Nightscout queries.
+**44 read-only MCP tools** spanning live data, history, and analytics. The LLM can ask things like *"What's my current BG and how much insulin is on board?"* or *"Has the dawn phenomenon hit me on more than half the mornings this week?"* and get back structured answers backed by real Nightscout queries.
 
 ### Read tools (10)
 
@@ -30,7 +30,7 @@ This tool reads CGM data and surfaces it to an LLM. **It is not a medical device
 | `get_server_status` | Nightscout version, status, configured units |
 | `search_treatments` | Free-form substring across notes / event types |
 
-### Analytics tools (10)
+### Analytics tools (11)
 
 | Tool | Returns |
 |---|---|
@@ -46,7 +46,7 @@ This tool reads CGM data and surfaces it to an LLM. **It is not a medical device
 | `glucose_at_time` | Single point-in-time SGV with ±N-min tolerance |
 | `compression_low_analysis` | Suspected sensor-compression artifacts (false lows) |
 
-### Research-grade clinical metrics (11)
+### Research-grade clinical metrics (12)
 
 Canonical CGM metrics from the clinical literature, computed from existing Nightscout data. Added per a 2026-05-24 deep research review of pediatric closed-loop T1D analytics. All formulas cited; references in module docstrings.
 
@@ -65,12 +65,13 @@ Canonical CGM metrics from the clinical literature, computed from existing Night
 | `dia_fit_estimate` | Exploratory fit of AAPS exponential IOB curve to observed bolus residuals → suggested DIA + peak | oref0 exponential / AAPS Oref |
 | `clinic_packet` | Composite 30-day markdown report (TIR + GRI + LBGI/HBGI + per-meal-period + change-points) ready to share with endo team | |
 
-### Composition tools (5)
+### Composition tools (6)
 
 Higher-level tools that compose the metrics suite into actionable outputs.
 
 | Tool | Returns | Reference |
 |---|---|---|
+| `daily_synthesis` | Combined cross-tool clinical roll-up (stats + IOB/COB + ISF/CR + patterns) over a window, with a plain-English narrative | (composition) |
 | `dynisf_adjustment_recommender` | Recommends Dynamic ISF Adjustment Factor based on observed per-band ISF residuals. Distinguishes BG-curve dampening from uniform AF error per the deep-research decision tree. | Deep research report 2026-05-24 Key Finding #1 |
 | `consensus_target_audit` | One-shot pass/fail audit of patient metrics vs. Battelino 2019 / ISPAD 2022 / Klonoff 2023 / Kovatchev thresholds | Battelino 2019, ISPAD 2022 |
 | `settings_change_attribution` | For each profile-switch event in window: pre-vs-post TIR / TBR / GRI with Benjamini-Hochberg FDR correction across changes | BH FDR (Benjamini & Hochberg 1995) |
@@ -136,7 +137,7 @@ This project takes a deliberately different slot:
 | Transport | **stdio** — no exposed network surface |
 | Auth | **Token only** — refuses `API_SECRET` (least privilege) |
 | Writes | **None** — provably safer for personal/educational use |
-| Tests | **210 passing** including a cross-tool token-leak regression |
+| Tests | **230+ passing** including a cross-tool token-leak regression |
 | Default units | **mmol/L** (overridable) — every payload includes both |
 | Analytics | **Real-world ISF**, compression-low detection, recurring pattern detection |
 
@@ -198,7 +199,7 @@ Add to `claude_desktop_config.json` (macOS: `~/Library/Application Support/Claud
 }
 ```
 
-Restart Claude Desktop. The 41 tools appear under the 🔌 menu.
+Restart Claude Desktop. The 44 tools appear under the 🔌 menu.
 
 ### Claude Code
 
@@ -227,7 +228,7 @@ What this project does *not* do:
 
 ```bash
 uv sync --extra dev
-uv run pytest                            # all 75 tests
+uv run pytest                            # full test suite
 uv run pytest tests/test_analytics.py    # just analytics
 uv run ruff check .                      # lint
 ```

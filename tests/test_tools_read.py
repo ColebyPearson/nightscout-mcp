@@ -616,7 +616,7 @@ async def test_get_device_status_skips_uploader_only_rows(
 async def test_get_device_status_prefers_loop_data_over_pump_only_latest(
     registry_and_client: tuple[_ToolRegistry, NightscoutClient],
 ) -> None:
-    """Issue #2 — live scenario from gladoctopus.my.nightscoutpro.com:
+    """Issue #2 — live scenario from a personal Nightscout instance:
 
     The chronologically newest devicestatus row has pump fields (reservoir,
     battery) but no loop fields (iob, cob, enacted). A prior row carries

@@ -10,6 +10,7 @@ never returned to the LLM.
 from __future__ import annotations
 
 import logging
+from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
 import httpx
@@ -19,6 +20,12 @@ from .logging_setup import TokenScrubFilter
 
 # Be polite to free-tier Heroku/Atlas Nightscout instances.
 _DEFAULT_TIMEOUT = httpx.Timeout(connect=5.0, read=15.0, write=10.0, pool=5.0)
+
+try:
+    _VERSION = version("nightscout-mcp")
+except PackageNotFoundError:  # not installed (e.g. running from a raw checkout)
+    _VERSION = "0+unknown"
+_USER_AGENT = f"nightscout-mcp/{_VERSION} (+https://github.com/ColebyPearson/nightscout-mcp)"
 
 
 def _ensure_httpx_logger_scrubbed() -> None:
@@ -45,7 +52,7 @@ class NightscoutClient:
         self._http = httpx.AsyncClient(
             base_url=settings.base_url,
             timeout=_DEFAULT_TIMEOUT,
-            headers={"User-Agent": "nightscout-mcp/0.2.0 (+https://github.com/ColebyPearson/nightscout-mcp)"},
+            headers={"User-Agent": _USER_AGENT},
         )
 
     @property
