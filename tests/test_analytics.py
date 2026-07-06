@@ -16,6 +16,7 @@ from nightscout_mcp.analytics import (
     daily_report,
     detect_patterns,
     effective_isf_check,
+    hypo_episodes,
     insulin_sensitivity_check,
     overnight_analysis,
 )
@@ -327,6 +328,92 @@ def test_detect_patterns_overnight_low_uses_local_time() -> None:
     evening_groups = [("2026-05-22", [_sgv(60, day + timedelta(hours=2))])]
     r2 = detect_patterns(1, evening_groups, tz_offset_hours=-5.0)
     assert not any(p.type == "overnight_low" for p in r2.patterns)
+
+
+# --- hypo_episodes -----------------------------------------------------------
+
+
+def _low_run(base: datetime, values: list[int], step_min: int = 5) -> list[Sgv]:
+    return [_sgv(v, base + timedelta(minutes=i * step_min)) for i, v in enumerate(values)]
+
+
+def test_hypo_episode_requires_15_min_below_70() -> None:
+    base = datetime(2026, 5, 22, 14, 0, tzinfo=UTC)
+    # 15-min run (0,5,10,15) all <70 -> one level-1 event.
+    sgvs = _low_run(base, [68, 65, 62, 66]) + [_sgv(120, base + timedelta(minutes=25))]
+    r = hypo_episodes(1, sgvs)
+    assert r.total_episodes == 1
+    e = r.episodes[0]
+    assert e.duration_minutes == 15
+    assert e.nadir_mgdl == 62
+    assert e.level == 1
+    assert e.rescue_carbs is False
+
+
+def test_hypo_single_brief_low_is_not_an_episode() -> None:
+    base = datetime(2026, 5, 22, 14, 0, tzinfo=UTC)
+    # Only two <70 readings spanning 5 min -> below the 15-min floor.
+    sgvs = _low_run(base, [65, 66]) + [_sgv(120, base + timedelta(minutes=15))]
+    r = hypo_episodes(1, sgvs)
+    assert r.total_episodes == 0
+    assert "No consensus" in r.summary
+
+
+def test_hypo_level2_set_by_nadir_below_54() -> None:
+    base = datetime(2026, 5, 22, 14, 0, tzinfo=UTC)
+    sgvs = _low_run(base, [66, 58, 50, 60]) + [_sgv(110, base + timedelta(minutes=30))]
+    r = hypo_episodes(1, sgvs)
+    assert r.total_episodes == 1
+    assert r.episodes[0].level == 2
+    assert r.level2_episodes == 1
+
+
+def test_hypo_brief_rise_does_not_split_one_event() -> None:
+    base = datetime(2026, 5, 22, 14, 0, tzinfo=UTC)
+    # Low, a single 75 blip (5 min above, <15 recovery), then low again.
+    sgvs = (
+        _low_run(base, [66, 64])
+        + [_sgv(75, base + timedelta(minutes=10))]
+        + _low_run(base + timedelta(minutes=15), [63, 62, 68])
+    )
+    r = hypo_episodes(1, sgvs)
+    assert r.total_episodes == 1  # merged, not two
+
+
+def test_hypo_nocturnal_flag_uses_local_time() -> None:
+    day = datetime(2026, 5, 22, 0, 0, tzinfo=UTC)
+    # UTC 08:00-08:15 == local 03:00 at offset -5 -> nocturnal.
+    sgvs = _low_run(day + timedelta(hours=8), [66, 62, 64, 65])
+    r = hypo_episodes(1, sgvs, tz_offset_hours=-5.0)
+    assert r.total_episodes == 1
+    assert r.episodes[0].nocturnal is True
+    assert r.nocturnal_episodes == 1
+
+
+def test_hypo_rescue_carbs_linked_to_event() -> None:
+    base = datetime(2026, 5, 22, 14, 0, tzinfo=UTC)
+    sgvs = _low_run(base, [66, 60, 58, 64]) + [_sgv(120, base + timedelta(minutes=30))]
+    txs = [_tx("Carb Correction", base + timedelta(minutes=10), carbs=15)]
+    r = hypo_episodes(1, sgvs, txs)
+    assert r.total_episodes == 1
+    assert r.episodes[0].rescue_carbs is True
+    assert r.episodes_with_rescue_carbs == 1
+
+
+def test_hypo_flags_low_cgm_coverage() -> None:
+    base = datetime(2026, 5, 22, 14, 0, tzinfo=UTC)
+    sgvs = _low_run(base, [66, 64, 62, 65])  # 4 readings over a claimed 14 days
+    r = hypo_episodes(14, sgvs)
+    assert r.pct_cgm_active < 70
+    assert "CGM-active" in r.summary
+
+
+def test_hypo_excludes_zero_sgv() -> None:
+    base = datetime(2026, 5, 22, 14, 0, tzinfo=UTC)
+    # A 0 must not seed a phantom level-2 event.
+    sgvs = [_sgv(0, base), _sgv(120, base + timedelta(minutes=5))]
+    r = hypo_episodes(1, sgvs)
+    assert r.total_episodes == 0
 
 
 def test_isf_check_excludes_boluses_near_carbs() -> None:
