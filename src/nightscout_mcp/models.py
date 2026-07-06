@@ -256,6 +256,9 @@ class GlucoseStats(BaseModel):
     sd_mgdl: float
     cv_percent: float
     gmi_percent: float
+    gmi_reliable: bool = True
+    """False when the window is <14 days — GMI is not interpretable over short
+    spans and should be treated as indicative only (e.g. daily reports)."""
     tir_percent: float
     tbr_lt70_percent: float
     tbr_lt54_percent: float
