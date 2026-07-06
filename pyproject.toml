@@ -32,6 +32,11 @@ dev = [
     "respx>=0.20",
     "ruff>=0.4",
 ]
+# Local mock Nightscout server for end-to-end testing (dev/ scripts). Not
+# needed to run or test the MCP itself.
+dev-server = [
+    "trustme>=1.1",
+]
 
 [project.scripts]
 nightscout-mcp = "nightscout_mcp.server:main"

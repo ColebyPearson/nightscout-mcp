@@ -52,9 +52,14 @@ class NightscoutClient:
         # logs (incl. tracebacks / JSON bodies), not just token-shaped patterns.
         register_secret(settings.nightscout_token)
         _ensure_httpx_logger_scrubbed()
+        # verify=True keeps default certifi verification; a CA-bundle path
+        # supports self-hosted instances behind a private CA (and the dev mock).
+        # This never disables verification.
+        verify: str | bool = settings.nightscout_ca_bundle or True
         self._http = httpx.AsyncClient(
             base_url=settings.base_url,
             timeout=_DEFAULT_TIMEOUT,
+            verify=verify,
             headers={"User-Agent": _USER_AGENT},
         )
 

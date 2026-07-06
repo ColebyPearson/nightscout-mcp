@@ -7,6 +7,10 @@
 LANDSCAPE.md
 notes/
 
+# Dev mock server: generated TLS certs and any real (PHI) data drops
+dev/certs/
+dev/data/
+
 # Claude Code local settings (per-machine, not for the repo)
 .claude/settings.local.json
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from nightscout_mcp.config import Settings
+from nightscout_mcp.config import Settings, load_settings
 
 
 def _env(**overrides: str) -> dict[str, str]:
@@ -70,3 +70,11 @@ def test_base_url_strips_trailing_slash(monkeypatch: pytest.MonkeyPatch) -> None
         monkeypatch.setenv(k, v)
     s = _make()
     assert s.base_url == "https://example.nightscout.test"
+
+
+def test_ca_bundle_defaults_none_and_is_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    for k, v in _env().items():
+        monkeypatch.setenv(k, v)
+    assert _make().nightscout_ca_bundle is None  # default: certifi verification
+    monkeypatch.setenv("NIGHTSCOUT_CA_BUNDLE", "/path/to/ca.pem")
+    assert load_settings().nightscout_ca_bundle == "/path/to/ca.pem"

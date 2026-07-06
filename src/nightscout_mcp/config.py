@@ -38,6 +38,12 @@ class Settings(BaseSettings):
         description="Default units for LLM-friendly summaries. Raw payloads include both.",
     )
 
+    # Optional CA bundle path for self-hosted Nightscout behind a private or
+    # self-signed CA (also what the local dev mock server uses). When set, it's
+    # passed to httpx as the TLS verify target; unset keeps the default certifi
+    # verification. It does NOT disable verification — there's no insecure mode.
+    nightscout_ca_bundle: str | None = Field(default=None)
+
     # Phase 3 (writes) — present for forward compatibility; not used yet.
     nightscout_allow_writes: bool = Field(default=False)
     nightscout_writer_token: str | None = Field(default=None)
@@ -48,8 +54,7 @@ class Settings(BaseSettings):
         if v.scheme != "https":
             # Health data over plaintext is non-negotiable.
             raise ValueError(
-                f"NIGHTSCOUT_URL must use https:// (got {v.scheme}://). "
-                "Cleartext HTTP is unsafe for health data."
+                f"NIGHTSCOUT_URL must use https:// (got {v.scheme}://). Cleartext HTTP is unsafe for health data."
             )
         return v
 
