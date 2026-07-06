@@ -181,7 +181,7 @@ This is health data on a public repo — non-negotiables:
 
 ## 10. Next actions
 
-1. ✅ Phase 0 scaffold committed to main (`56710e0`, `31a207d`). Live `health_check` verified against `gladoctopus.my.nightscoutpro.com` (Nightscout v15.0.5). 8/8 tests passing.
+1. ✅ Phase 0 scaffold committed to main (`56710e0`, `31a207d`). Live `health_check` verified against `a personal Nightscout instance` (Nightscout v15.0.5). 8/8 tests passing.
 2. **▶ Phase 1 read tools + logging hygiene on `feat/phase-1-read-tools`. PR #1.**
 3. Phase 2 analytics (incl. `insulin_sensitivity_check`, optional `compression_low_analysis`) on `feat/phase-2-analytics`. PR #2.
 4. README polish + Claude Desktop config screenshot for the portfolio angle. PR #3.

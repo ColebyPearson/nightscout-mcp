@@ -24,7 +24,7 @@ def test_sgv_parses_native_camelcase_fields() -> None:
 
 def test_sgv_synthesizes_iso_when_datestring_missing() -> None:
     # Some Nightscout uploaders only write `date` (Unix ms), not `dateString`.
-    # Discovered against gladoctopus.my.nightscoutpro.com on 2026-05-22.
+    # Discovered against a personal Nightscout instance on 2026-05-22.
     raw = {
         "_id": "abc",
         "sgv": 142,

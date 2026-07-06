@@ -523,7 +523,7 @@ def test_carb_ratio_check_derives_average_applied_cr() -> None:
 
 def test_carb_ratio_check_pairs_aaps_style_split_carb_and_insulin_rows() -> None:
     """AAPS writes carbs and insulin as SEPARATE treatment rows close in time.
-    Discovered against gladoctopus.my.nightscoutpro.com — 0 of 50 rows had
+    Discovered against a personal Nightscout instance — 0 of 50 rows had
     both fields populated in one row.
     """
     base = datetime(2026, 5, 22, 12, 0, tzinfo=UTC)
@@ -746,7 +746,7 @@ def test_effective_isf_check_skips_devicestatus_after_bolus() -> None:
 
 def test_effective_isf_check_reads_aaps_variable_sens_field() -> None:
     """AAPS Dynamic ISF publishes `variable_sens` (mg/dL/U) instead of oref0's
-    `sens` field. Discovered against gladoctopus.my.nightscoutpro.com on
+    `sens` field. Discovered against a personal Nightscout instance on
     2026-05-23: 5396 devicestatus rows, zero with `sens`, all with
     `variable_sens` ranging 109-110 mg/dL/U.
     """
