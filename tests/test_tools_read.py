@@ -826,3 +826,31 @@ async def test_no_tool_response_contains_the_token(
         else:
             serialized = json.dumps(resp, default=lambda o: o.model_dump() if hasattr(o, "model_dump") else str(o))
         assert LEAK_CANARY not in serialized, f"Token leaked in: {type(resp).__name__}"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_clinic_packet_renders_agp_grade_sections(
+    registry_and_client: tuple[_ToolRegistry, NightscoutClient],
+) -> None:
+    """The overhauled clinic_packet must include the AGP-grade sections a care
+    team expects: coverage, hypo events, insulin/carb summary, embedded AGP,
+    daily profiles, and Time-in-Tight-Range."""
+    reg, client = registry_and_client
+    _mock_all(respx.mock)
+    try:
+        result = await reg.tools["clinic_packet"](days=14)
+    finally:
+        await client.aclose()
+
+    body = result.markdown_body
+    assert "CGM coverage:" in body
+    assert "TITR (70-140)" in body
+    assert "Hypoglycemia events" in body
+    assert "Insulin & carbohydrate summary" in body
+    assert "Ambulatory Glucose Profile" in body
+    assert "Daily profiles" in body
+    assert "GMI" in body and "individualize" in body
+    # Sufficiency block is populated and, on this tiny fixture, flags low coverage.
+    assert result.data_sufficiency is not None
+    assert result.data_sufficiency.meets_agp_consensus is False
