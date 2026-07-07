@@ -64,6 +64,29 @@ If `entries.json` is present the mock serves your files instead of synthetic
 data. **This is donated human data** — keep it in `dev/data/` (gitignored), never
 commit it, and honor the source's data-use agreement. Don't paste it into an LLM.
 
+### Auto-fetch from Open Humans
+
+`dev/openhumans_download.py` pulls a member's Nightscout files straight into
+`dev/data/`. You need an Open Humans **member access token** — authorize an
+Open Humans OAuth2 project against your account and use the token it issues (see
+the OH direct-sharing / "on your own data" docs).
+
+```bash
+export OPEN_HUMANS_TOKEN=...
+uv run --extra dev-server python dev/openhumans_download.py --list   # preview files (* = looks like Nightscout)
+uv run --extra dev-server python dev/openhumans_download.py          # download Nightscout files + normalize
+uv run --extra dev-server python dev/mock_nightscout.py              # serve them
+```
+
+It downloads the Nightscout-looking files, normalizes whatever shape they arrive
+in (separate collection files, a combined JSON, ndjson, or a zip) into the five
+canonical `dev/data/*.json` files, and synthesizes a `status.json` from the
+profile units if the export lacks one. Flags: `--list` (preview only), `--all`
+(grab every file, not just Nightscout-looking), `--keep-raw` (retain the raw
+downloads under `dev/data/raw/` for inspection).
+
+Same PHI rules apply — everything lands in gitignored `dev/data/`.
+
 ## Notes
 
 - Synthetic data is deterministic (seeded) and **not medically meaningful** — it's
